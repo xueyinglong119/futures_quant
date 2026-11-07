@@ -11,6 +11,8 @@ reports/*.json
 data/*.csv
 data/*.db
 data/alerts.json
+data/kline_dl_tmp/
+data/_trial_*
 dist/
 *.zip
 .idea/

@@ -1,6 +1,6 @@
 #!/bin/sh
 # 前台：HTTP API（手机 App 连这个）
-# 后台：乙二醇头肩盯盘，告警写入 /app/data/alerts.json
+# 后台：全商品主力多周期头肩盯盘，告警写入 /app/data/alerts.json
 set -u
 
 mkdir -p /app/data /app/reports
@@ -8,8 +8,11 @@ mkdir -p /app/data /app/reports
 monitor_loop() {
   while true; do
     echo "[monitor] start $(date '+%F %T')"
-    python -u scripts/monitor_eg2701_hs_1m.py || echo "[monitor] exit $?"
-    # 15:00 日盘结束后等到 20:50 再登录快期，避免休市时空转反复建连
+    python -u scripts/monitor_all_mains_hs.py \
+      --interval 60 \
+      --durations 1m,5m,30m,1h,2h,1d \
+      || echo "[monitor] exit $?"
+    # 15:00 日盘结束后等到 20:50 再启动，避免休市时空转
     hour=$(date +%H)
     min=$(date +%M)
     hm=$((10#$hour * 60 + 10#$min))

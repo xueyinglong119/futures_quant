@@ -52,7 +52,14 @@ chmod +x deploy/install_docker.sh deploy/docker-entrypoint.sh
 sudo bash deploy/install_docker.sh
 ```
 
-容器里同时跑两件事：8000 端口的 HTTP 接口，以及乙二醇头肩盯盘。告警写在数据卷 `data/alerts.json`，手机 App 把服务器地址改成 `http://ECS公网IP:8000`。
+容器里同时跑两件事：8000 端口的 HTTP 接口，以及**全商品主力多周期头肩盯盘**（1m/5m/30m/1h/2h/日线，读 MySQL）。告警写在数据卷 `data/alerts.json`，手机 App 把服务器地址改成 `http://ECS公网IP:8000`。
+
+本机试跑监控：
+
+```bash
+python -u scripts/monitor_all_mains_hs.py --once --watchlist --durations "30m,1h,1d"
+python -u scripts/monitor_all_mains_hs.py --interval 60
+```
 
 若 `docker compose build` 拉 `python:3.11-slim-bookworm` 超时，在 `/etc/docker/daemon.json` 配好阿里云镜像加速器后执行 `systemctl restart docker`，再重新 build。
 

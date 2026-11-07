@@ -13,6 +13,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from core.alert_store import add_alert, list_alerts, mark_read, register_device
+from core.indicators import (
+    bars_from_records,
+    compute_overlay_indicators,
+    latest_indicator_snapshot,
+)
+from core.kline_store import LABEL_TO_DURATION, connect, ensure_table, load_bars
 from core.market_data import DEFAULT_KLINE_SECONDS, get_today_klines
 from core.push_notify import send_alert_push
 
@@ -116,6 +122,83 @@ def api_klines(
         raise HTTPException(status_code=500, detail=f"获取 K 线失败: {exc}") from exc
 
     return JSONResponse(content=result)
+
+
+@app.get("/api/indicators")
+def api_indicators(
+    symbol: str = Query(..., description="主连/合约，如 KQ.m@DCE.eg"),
+    duration: str = Query(
+        "1d",
+        description="周期: 1m/3m/5m/10m/15m/30m/1h/2h/3h/4h/1d/1w/1mon",
+    ),
+    limit: int = Query(
+        0,
+        ge=0,
+        le=5000,
+        description="返回最近 N 根明细，0 表示只返回最新快照",
+    ),
+) -> JSONResponse:
+    """
+    基于已入库 K 线计算 MA / BOLL / EXPMA / 神奇九转。
+
+    示例: GET /api/indicators?symbol=KQ.m@DCE.eg&duration=1d&limit=20
+    """
+    label = duration.strip().lower()
+    if label not in LABEL_TO_DURATION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的周期 {duration}，可选: {', '.join(LABEL_TO_DURATION)}",
+        )
+
+    conn = connect()
+    ensure_table(conn)
+    try:
+        records = load_bars(conn, symbol.strip(), LABEL_TO_DURATION[label])
+    finally:
+        conn.close()
+
+    if not records:
+        raise HTTPException(status_code=404, detail="库中无该品种/周期数据")
+
+    df = bars_from_records(records)
+    enriched = compute_overlay_indicators(df)
+    snap = latest_indicator_snapshot(enriched)
+
+    payload: dict[str, Any] = {
+        "symbol": symbol.strip(),
+        "duration": label,
+        "bars": len(enriched),
+        "latest": snap,
+    }
+    if limit > 0:
+        tail = enriched.tail(limit).copy()
+        # datetime 转字符串，便于 JSON
+        if "datetime_end" in tail.columns:
+            tail["datetime_end"] = tail["datetime_end"].astype(str)
+        for col in ("td_sell_nine", "td_buy_nine"):
+            if col in tail.columns:
+                tail[col] = tail[col].astype(bool)
+        payload["series"] = json_safe_records(tail)
+    return JSONResponse(content=payload)
+
+
+def json_safe_records(df) -> list[dict[str, Any]]:
+    import math
+
+    import pandas as pd
+
+    rows: list[dict[str, Any]] = []
+    for rec in df.to_dict(orient="records"):
+        clean: dict[str, Any] = {}
+        for k, v in rec.items():
+            if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
+                clean[k] = None
+            elif isinstance(v, (pd.Timestamp,)):
+                clean[k] = str(v)
+            else:
+                clean[k] = v
+        rows.append(clean)
+    return rows
 
 
 @app.get("/api/alerts")
