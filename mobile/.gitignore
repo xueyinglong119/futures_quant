@@ -1,0 +1,12 @@
+node_modules/
+.expo/
+dist/
+.tools/
+.android-sdk/
+android/
+ios/
+*.apk
+*.aab
+*.keystore
+credentials.json
+.DS_Store

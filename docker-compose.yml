@@ -1,0 +1,15 @@
+services:
+  futures-api:
+    build: .
+    image: futures-quant-api:latest
+    container_name: futures-quant-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./reports:/app/reports
+      - ./data:/app/data

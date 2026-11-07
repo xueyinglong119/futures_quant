@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>燃油 2701 · 昨日 K 线</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <style>
+    :root {
+      --ink: #1a1f24;
+      --muted: #5c6770;
+      --paper: #f3efe6;
+      --paper-2: #e8e2d4;
+      --line: #c9c0ae;
+      --up: #c45c26;
+      --down: #2f6b5c;
+      --accent: #9a3412;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      font-family: "IBM Plex Sans", sans-serif;
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #efe6d4 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #ddd4c2 0%, transparent 50%),
+        linear-gradient(180deg, var(--paper) 0%, var(--paper-2) 100%);
+    }
+
+    .page {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 40px 24px 56px;
+    }
+
+    .brand {
+      font-family: "Newsreader", Georgia, serif;
+      font-size: clamp(2.4rem, 5vw, 3.4rem);
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.05;
+      margin: 0 0 10px;
+    }
+
+    .lead {
+      margin: 0 0 28px;
+      max-width: 36rem;
+      color: var(--muted);
+      font-size: 1.05rem;
+      line-height: 1.5;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 28px;
+      margin-bottom: 22px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+      font-size: 0.92rem;
+    }
+
+    .meta b { font-weight: 600; }
+    .meta span { color: var(--muted); }
+    .up { color: var(--up); font-weight: 600; }
+    .down { color: var(--down); font-weight: 600; }
+
+    #chart {
+      width: 100%;
+      height: min(62vh, 560px);
+      min-height: 380px;
+    }
+
+    .foot {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    .actions {
+      margin-top: 20px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid var(--ink);
+      background: var(--ink);
+      color: var(--paper);
+      font: inherit;
+      font-size: 0.9rem;
+      padding: 10px 16px;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: transparent;
+      color: var(--ink);
+    }
+
+    button:hover { opacity: 0.88; }
+
+    @media (max-width: 640px) {
+      .page { padding: 28px 16px 40px; }
+      #chart { min-height: 320px; height: 52vh; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <h1 class="brand">燃油 2701</h1>
+    <p class="lead">昨日交易时段 30 分钟 K 线（含前一日夜盘）。国内规则合成：日盘 8 根 + 夜盘 4 根。</p>
+
+    <div class="meta" id="meta"></div>
+    <div id="chart"></div>
+    <p class="foot" id="foot"></p>
+    <div class="actions">
+      <button type="button" id="btn-refresh">从接口刷新</button>
+      <button type="button" class="secondary" id="btn-day">仅日盘</button>
+    </div>
+  </main>
+
+  <script>
+    // 昨日完整时段（2026-10-28 夜盘 + 2026-10-29 日盘），来源 future_ai.session_kline_30m / SHFE.fu2701
+    const EMBEDDED = {
+      symbol: "SHFE.fu2701",
+      trade_date: "2026-10-29",
+      session: "night+day",
+      klines: [
+        { datetime_end: "2026-10-28T21:30:00", open: 5433, high: 5494, low: 5433, close: 5457, volume: 158876 },
+        { datetime_end: "2026-10-28T22:00:00", open: 5457, high: 5496, low: 5437, close: 5453, volume: 91528 },
+        { datetime_end: "2026-10-28T22:30:00", open: 5453, high: 5538, low: 5451, close: 5530, volume: 86679 },
+        { datetime_end: "2026-10-28T23:00:00", open: 5530, high: 5580, low: 5515, close: 5559, volume: 90126 },
+        { datetime_end: "2026-10-29T09:30:00", open: 5500, high: 5596, low: 5480, close: 5541, volume: 123076 },
+        { datetime_end: "2026-10-29T10:00:00", open: 5541, high: 5562, low: 5498, close: 5501, volume: 59828 },
+        { datetime_end: "2026-10-29T10:45:00", open: 5501, high: 5515, low: 5445, close: 5488, volume: 71772 },
+        { datetime_end: "2026-10-29T11:15:00", open: 5488, high: 5495, low: 5385, close: 5415, volume: 78106 },
+        { datetime_end: "2026-10-29T13:45:00", open: 5415, high: 5432, low: 5361, close: 5390, volume: 56696 },
+        { datetime_end: "2026-10-29T14:15:00", open: 5390, high: 5429, low: 5383, close: 5420, volume: 46549 },
+        { datetime_end: "2026-10-29T14:45:00", open: 5420, high: 5422, low: 5370, close: 5419, volume: 46301 },
+        { datetime_end: "2026-10-29T15:00:00", open: 5419, high: 5427, low: 5401, close: 5418, volume: 24207 },
+      ],
+    };
+
+    let showNight = true;
+    let chart;
+
+    function labelOf(iso) {
+      const d = new Date(iso);
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      const isNight = d.getHours() >= 21;
+      const day = `${d.getMonth() + 1}/${d.getDate()}`;
+      return isNight ? `${day} ${hh}:${mm}` : `${hh}:${mm}`;
+    }
+
+    function activeBars(data) {
+      if (showNight) return data.klines;
+      return data.klines.filter((b) => {
+        const h = new Date(b.datetime_end).getHours();
+        return h < 21;
+      });
+    }
+
+    function renderMeta(data) {
+      const bars = activeBars(data);
+      const first = bars[0];
+      const last = bars[bars.length - 1];
+      const chg = last.close - first.open;
+      const pct = (chg / first.open) * 100;
+      const cls = chg >= 0 ? "up" : "down";
+      const sign = chg >= 0 ? "+" : "";
+      document.getElementById("meta").innerHTML = `
+        <div><span>合约</span> <b>${data.symbol}</b></div>
+        <div><span>交易日</span> <b>${data.trade_date}</b></div>
+        <div><span>开盘</span> <b>${first.open}</b></div>
+        <div><span>最高</span> <b>${Math.max(...bars.map((b) => b.high))}</b></div>
+        <div><span>最低</span> <b>${Math.min(...bars.map((b) => b.low))}</b></div>
+        <div><span>收盘</span> <b>${last.close}</b></div>
+        <div><span>涨跌</span> <b class="${cls}">${sign}${chg.toFixed(0)}（${sign}${pct.toFixed(2)}%）</b></div>
+      `;
+      document.getElementById("foot").textContent =
+        `Source: session_kline_30m · ${bars.length} 根 · ${showNight ? "夜盘+日盘" : "仅日盘"}`;
+      document.getElementById("btn-day").textContent = showNight ? "仅日盘" : "夜盘+日盘";
+    }
+
+    function renderChart(data) {
+      const bars = activeBars(data);
+      const cats = bars.map((b) => labelOf(b.datetime_end));
+      const ohlc = bars.map((b) => [b.open, b.close, b.low, b.high]);
+      const vols = bars.map((b, i) => ({
+        value: b.volume,
+        itemStyle: {
+          color: bars[i].close >= bars[i].open ? "rgba(196,92,38,0.45)" : "rgba(47,107,92,0.45)",
+        },
+      }));
+
+      if (!chart) {
+        chart = echarts.init(document.getElementById("chart"), null, { renderer: "canvas" });
+        window.addEventListener("resize", () => chart.resize());
+      }
+
+      chart.setOption({
+        animation: false,
+        backgroundColor: "transparent",
+        legend: { show: false },
+        tooltip: {
+          trigger: "axis",
+          axisPointer: { type: "cross" },
+          formatter(params) {
+            const c = params.find((p) => p.seriesName === "K线");
+            const v = params.find((p) => p.seriesName === "成交量");
+            if (!c) return "";
+            const [o, cl, l, h] = c.data;
+            return `${c.axisValue}<br/>开 ${o}<br/>高 ${h}<br/>低 ${l}<br/>收 ${cl}` +
+              (v ? `<br/>量 ${v.data.value}` : "");
+          },
+        },
+        axisPointer: { link: [{ xAxisIndex: "all" }] },
+        grid: [
+          { left: 56, right: 24, top: 24, height: "58%" },
+          { left: 56, right: 24, top: "76%", height: "16%" },
+        ],
+        xAxis: [
+          {
+            type: "category",
+            data: cats,
+            boundaryGap: true,
+            axisLine: { lineStyle: { color: "#c9c0ae" } },
+            axisLabel: { color: "#5c6770" },
+            splitLine: { show: false },
+            min: "dataMin",
+            max: "dataMax",
+            axisPointer: { label: { show: false } },
+          },
+          {
+            type: "category",
+            gridIndex: 1,
+            data: cats,
+            boundaryGap: true,
+            axisLine: { lineStyle: { color: "#c9c0ae" } },
+            axisLabel: { show: false },
+            axisTick: { show: false },
+            splitLine: { show: false },
+            min: "dataMin",
+            max: "dataMax",
+          },
+        ],
+        yAxis: [
+          {
+            scale: true,
+            splitArea: { show: false },
+            splitLine: { lineStyle: { color: "rgba(201,192,174,0.55)" } },
+            axisLabel: { color: "#5c6770" },
+            axisLine: { show: false },
+          },
+          {
+            scale: true,
+            gridIndex: 1,
+            splitNumber: 2,
+            axisLabel: { show: false },
+            axisLine: { show: false },
+            axisTick: { show: false },
+            splitLine: { show: false },
+          },
+        ],
+        series: [
+          {
+            name: "K线",
+            type: "candlestick",
+            data: ohlc,
+            itemStyle: {
+              color: "#c45c26",
+              color0: "#2f6b5c",
+              borderColor: "#c45c26",
+              borderColor0: "#2f6b5c",
+            },
+          },
+          {
+            name: "成交量",
+            type: "bar",
+            xAxisIndex: 1,
+            yAxisIndex: 1,
+            data: vols,
+          },
+        ],
+      }, true);
+    }
+
+    function paint(data) {
+      renderMeta(data);
+      renderChart(data);
+    }
+
+    async function refreshFromApi() {
+      const y = new Date();
+      y.setDate(y.getDate() - 1);
+      const dateStr = y.toISOString().slice(0, 10);
+      const url = `/api/klines?symbol=SHFE.fu2701&date=${dateStr}&minutes=30&time_label=end&session_aligned=true`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(await res.text());
+      const json = await res.json();
+      const dayBars = (json.klines || []).map((b) => ({
+        datetime_end: b.datetime_end,
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+        volume: b.volume,
+      }));
+      paint({
+        symbol: json.symbol || "SHFE.fu2701",
+        trade_date: json.trade_date || dateStr,
+        klines: dayBars.length ? dayBars : EMBEDDED.klines,
+      });
+    }
+
+    document.getElementById("btn-refresh").addEventListener("click", () => {
+      refreshFromApi().catch((err) => {
+        alert("刷新失败（请先启动 python main_api.py）: " + err.message);
+      });
+    });
+    document.getElementById("btn-day").addEventListener("click", () => {
+      showNight = !showNight;
+      paint(EMBEDDED);
+    });
+
+    paint(EMBEDDED);
+  </script>
+</body>
+</html>

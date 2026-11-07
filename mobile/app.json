@@ -1,0 +1,34 @@
+{
+  "expo": {
+    "name": "期货形态告警",
+    "slug": "futures-quant-alerts",
+    "version": "1.0.5",
+    "newArchEnabled": false,
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0B1F33"
+    },
+    "android": {
+      "package": "com.futuresquant.alerts",
+      "versionCode": 6,
+      "usesCleartextTraffic": true,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#FFFFFF"
+      },
+      "permissions": [],
+      "edgeToEdgeEnabled": false
+    },
+    "plugins": ["./withCleartext.js"],
+    "extra": {
+      "eas": {
+        "projectId": "0b8032bf-7913-4124-8a77-a3a76840d87f"
+      }
+    },
+    "owner": "xue_yinglong"
+  }
+}
