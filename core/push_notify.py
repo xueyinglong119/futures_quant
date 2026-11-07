@@ -17,17 +17,22 @@ def send_alert_push(alert: Alert) -> dict[str, Any]:
     if not devices:
         return {"sent": 0, "detail": "no_devices"}
 
+    name = (alert.extra or {}).get("name") or alert.symbol
+    duration = (alert.extra or {}).get("duration") or ""
+    title = f"{name} {duration} {alert.kind}".strip()
     messages = [
         {
             "to": d["token"],
-            "title": f"{alert.symbol} {alert.kind}",
-            "body": f"{alert.bar_time} {alert.reason}",
+            "title": title,
+            "body": f"K线 {alert.bar_time} | {alert.reason}",
             "sound": "default",
             "priority": "high",
             "data": {
                 "id": alert.id,
                 "symbol": alert.symbol,
                 "kind": alert.kind,
+                "name": name,
+                "duration": duration,
             },
         }
         for d in devices

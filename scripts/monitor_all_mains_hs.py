@@ -67,6 +67,7 @@ def run_scan(
     push: bool,
     toast: bool,
     force: bool,
+    emit: bool = True,
 ) -> tuple[int, int]:
     """返回 (检查数, 新告警数)。"""
     checked = 0
@@ -84,6 +85,7 @@ def run_scan(
                     push=push,
                     toast=toast,
                     force=force,
+                    emit=emit,
                     conn=conn,
                 )
                 alerts += n
@@ -141,8 +143,8 @@ def main() -> None:
     while True:
         round_no += 1
         t0 = time.time()
-        # 第一轮 force 检测当前窗口；之后仅新 K 线触发
-        force = round_no == 1
+        # 第一轮只预热（标记末根K线），不把历史形态当新告警刷屏
+        warmup = round_no == 1
         checked, alerts = run_scan(
             engine,
             symbols,
@@ -150,7 +152,8 @@ def main() -> None:
             alert_log=alert_log,
             push=not args.no_push,
             toast=args.toast,
-            force=force,
+            force=warmup,
+            emit=not warmup,
         )
         elapsed = time.time() - t0
         msg = (

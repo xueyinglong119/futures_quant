@@ -25,6 +25,7 @@ from core.kline_store import (
 )
 from core.push_notify import send_alert_push
 from strategies.head_shoulders import HeadShouldersStrategy
+from utils.symbols import get_display_name
 
 # 监控周期：1分 / 5分 / 30分 / 1小时 / 2小时 / 日线
 HS_MONITOR_DURATIONS: tuple[int, ...] = (
@@ -148,16 +149,17 @@ def emit_alert(
     toast: bool = True,
 ) -> None:
     label = DURATION_LABELS.get(duration_sec, str(duration_sec))
-    title = f"{symbol} {label} {kind}"
-    body = f"{when.strftime('%m-%d %H:%M')} {reason}"
-    print(f"!!! HS_ALERT !!! {title} | {body}", flush=True)
+    name = get_display_name(symbol)
+    title = f"{name} {label} {kind}"
+    body = f"K线 {when.strftime('%m-%d %H:%M')} | {reason}"
+    print(f"!!! HS_ALERT !!! {title} | {symbol} | {body}", flush=True)
 
     if alert_log is not None:
         alert_log.parent.mkdir(parents=True, exist_ok=True)
         with alert_log.open("a", encoding="utf-8") as f:
             f.write(
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {symbol} | {label} | "
-                f"{kind} | {when.isoformat(timespec='seconds')} | {reason}\n"
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {name} | {symbol} | "
+                f"{label} | {kind} | {when.isoformat(timespec='seconds')} | {reason}\n"
             )
 
     if toast:
@@ -167,9 +169,14 @@ def emit_alert(
         alert = add_alert(
             symbol=symbol,
             kind=kind,
-            reason=reason,
+            reason=f"[{name} · {label}] {reason}",
             bar_time=when.isoformat(timespec="seconds"),
-            extra={"duration": label, "duration_sec": duration_sec},
+            extra={
+                "duration": label,
+                "duration_sec": duration_sec,
+                "name": name,
+                "display": f"{name}({symbol})",
+            },
         )
         if push:
             push_result = send_alert_push(alert)
@@ -204,11 +211,13 @@ class HsMonitorEngine:
         push: bool = True,
         toast: bool = False,
         force: bool = False,
+        emit: bool = True,
         conn=None,
     ) -> int:
         """
         检测单个品种单个周期。
         仅在出现新 K 线（或 force=True）时检测；返回本轮新告警条数。
+        emit=False 时只预热状态（启动回扫历史用），不发告警。
         """
         df = load_tf_df(symbol, duration_sec, conn=conn)
         if df.empty:
@@ -223,7 +232,7 @@ class HsMonitorEngine:
         strategy = self._strategy(symbol, duration_sec)
         signal = strategy.on_bar(df, max_volume=1, symbol=key)
         self._last_bar_dt[key] = last_dt
-        if signal is None:
+        if signal is None or not emit:
             return 0
 
         kind = "头肩顶" if signal.action == "sell" else "头肩底"

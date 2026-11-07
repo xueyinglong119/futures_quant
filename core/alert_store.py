@@ -128,3 +128,12 @@ def register_device(token: str, platform: str = "android") -> Device:
 def list_devices() -> list[dict[str, Any]]:
     with _LOCK:
         return list(_load()["devices"])
+
+
+def clear_alerts() -> int:
+    with _LOCK:
+        data = _load()
+        n = len(data.get("alerts") or [])
+        data["alerts"] = []
+        _save(data)
+    return n

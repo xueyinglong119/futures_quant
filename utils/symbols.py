@@ -9,11 +9,109 @@ from datetime import datetime, time
 DAY_SESSION = (time(9, 0), time(11, 30), time(13, 30), time(15, 0))
 NIGHT_SESSION = (time(21, 0), time(23, 0))
 
+# 品种代码（大小写不敏感）-> 中文名
+PRODUCT_NAMES: dict[str, str] = {
+    # SHFE
+    "cu": "沪铜",
+    "al": "沪铝",
+    "zn": "沪锌",
+    "pb": "沪铅",
+    "ni": "沪镍",
+    "sn": "沪锡",
+    "au": "黄金",
+    "ag": "白银",
+    "rb": "螺纹钢",
+    "hc": "热卷",
+    "wr": "线材",
+    "ss": "不锈钢",
+    "ru": "橡胶",
+    "bu": "沥青",
+    "fu": "燃料油",
+    "sp": "纸浆",
+    "br": "丁二烯橡胶",
+    "ao": "氧化铝",
+    "ad": "铸造铝合金",
+    "op": "胶版纸",
+    # INE
+    "sc": "原油",
+    "lu": "低硫燃油",
+    "nr": "20号胶",
+    "bc": "国际铜",
+    "ec": "集运欧线",
+    # DCE
+    "a": "豆一",
+    "b": "豆二",
+    "m": "豆粕",
+    "y": "豆油",
+    "p": "棕榈油",
+    "c": "玉米",
+    "cs": "淀粉",
+    "i": "铁矿石",
+    "j": "焦炭",
+    "jm": "焦煤",
+    "l": "塑料",
+    "v": "PVC",
+    "pp": "聚丙烯",
+    "eg": "乙二醇",
+    "eb": "苯乙烯",
+    "pg": "LPG",
+    "jd": "鸡蛋",
+    "lh": "生猪",
+    "rr": "粳米",
+    "lg": "原木",
+    "fb": "纤维板",
+    "bb": "胶合板",
+    "bz": "纯苯",
+    # CZCE
+    "TA": "PTA",
+    "MA": "甲醇",
+    "SA": "纯碱",
+    "FG": "玻璃",
+    "UR": "尿素",
+    "SR": "白糖",
+    "CF": "棉花",
+    "CY": "棉纱",
+    "RM": "菜粕",
+    "OI": "菜油",
+    "RS": "菜籽",
+    "PK": "花生",
+    "AP": "苹果",
+    "CJ": "红枣",
+    "SF": "硅铁",
+    "SM": "锰硅",
+    "PF": "短纤",
+    "SH": "烧碱",
+    "PX": "对二甲苯",
+    "PL": "丙烯",
+    "PR": "瓶片",
+    "ZC": "动力煤",
+    "WH": "强麦",
+    "PM": "普麦",
+    "RI": "早籼稻",
+    "LR": "晚籼稻",
+    "JR": "粳稻",
+    # GFEX
+    "si": "工业硅",
+    "lc": "碳酸锂",
+    "ps": "多晶硅",
+    "pt": "铂",
+    "pd": "钯",
+    # CFFEX
+    "IF": "沪深300",
+    "IH": "上证50",
+    "IC": "中证500",
+    "IM": "中证1000",
+    "T": "十年债",
+    "TF": "五年债",
+    "TS": "两年债",
+    "TL": "三十年债",
+}
+
 SYMBOL_NAMES = {
-    "KQ.m@SHFE.fu": "燃料油FU",
-    "KQ.m@INE.lu": "低硫燃油LU",
-    "KQ.m@CZCE.MA": "甲醇MA",
-    "KQ.m@DCE.eg": "乙二醇EG",
+    "KQ.m@SHFE.fu": "燃料油主连",
+    "KQ.m@INE.lu": "低硫燃油主连",
+    "KQ.m@CZCE.MA": "甲醇主连",
+    "KQ.m@DCE.eg": "乙二醇主连",
 }
 
 # 裸合约代码 -> 交易所（用于 normalize_contract_symbol）
@@ -28,13 +126,41 @@ PRODUCT_EXCHANGE: dict[str, str] = {
 }
 
 
-def parse_hhmm(value: str) -> time:
-    hour, minute = value.split(":")
-    return time(int(hour), int(minute))
+def _product_code_from_symbol(symbol: str) -> str:
+    raw = symbol.strip()
+    if raw.startswith("KQ.m@"):
+        raw = raw.split("@", 1)[1]
+    if "." in raw:
+        raw = raw.split(".", 1)[1]
+    m = re.match(r"^([A-Za-z]+)", raw)
+    return m.group(1) if m else raw
 
 
 def get_display_name(symbol: str) -> str:
-    return SYMBOL_NAMES.get(symbol, symbol)
+    """返回可读名称，如 线材主连 / 乙二醇2701。"""
+    if symbol in SYMBOL_NAMES:
+        return SYMBOL_NAMES[symbol]
+
+    product = _product_code_from_symbol(symbol)
+    name = (
+        PRODUCT_NAMES.get(product)
+        or PRODUCT_NAMES.get(product.lower())
+        or PRODUCT_NAMES.get(product.upper())
+        or product
+    )
+
+    if symbol.startswith("KQ.m@"):
+        return f"{name}主连"
+
+    m = re.search(r"(\d{3,4})$", symbol.strip())
+    if m:
+        return f"{name}{m.group(1)}"
+    return name
+
+
+def parse_hhmm(value: str) -> time:
+    hour, minute = value.split(":")
+    return time(int(hour), int(minute))
 
 
 def normalize_contract_symbol(symbol: str) -> str:

@@ -12,7 +12,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from core.alert_store import add_alert, list_alerts, mark_read, register_device
+from core.alert_store import add_alert, clear_alerts, list_alerts, mark_read, register_device
+from utils.symbols import get_display_name
 from core.indicators import (
     bars_from_records,
     compute_overlay_indicators,
@@ -207,7 +208,33 @@ def api_list_alerts(
     unread_only: bool = Query(False),
 ) -> dict[str, Any]:
     items = list_alerts(limit=limit, unread_only=unread_only)
+    for item in items:
+        symbol = str(item.get("symbol") or "")
+        extra = item.get("extra") or {}
+        if not isinstance(extra, dict):
+            extra = {}
+        name = str(extra.get("name") or (get_display_name(symbol) if symbol else ""))
+        duration = str(extra.get("duration") or "")
+        extra = {
+            **extra,
+            "name": name,
+            "code": symbol,
+            "display": f"{name}({symbol})" if name else symbol,
+        }
+        item["extra"] = extra
+        # 旧版 App 只展示 symbol · kind，这里直接返回可读标题
+        title = name or symbol
+        if duration:
+            title = f"{title} · {duration}"
+        item["symbol"] = title
     return {"count": len(items), "alerts": items}
+
+
+@app.post("/api/alerts/clear")
+def api_clear_alerts() -> dict[str, Any]:
+    """清空历史告警（启动误刷 / 测试数据）。"""
+    n = clear_alerts()
+    return {"cleared": n}
 
 
 @app.post("/api/alerts")

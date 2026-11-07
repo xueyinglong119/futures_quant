@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   AppState,
   FlatList,
+  Platform,
   Pressable,
   SafeAreaView,
   StatusBar,
@@ -12,6 +13,9 @@ import {
   View,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import Constants from "expo-constants";
+import * as Device from "expo-device";
+import * as Notifications from "expo-notifications";
 
 type AlertItem = {
   id: string;
@@ -21,10 +25,123 @@ type AlertItem = {
   bar_time: string;
   created_at: string;
   read: boolean;
+  extra?: {
+    duration?: string;
+    name?: string;
+    display?: string;
+    duration_sec?: number;
+  };
 };
 
 const STORAGE_API = "fq_api_base";
 const DEFAULT_API = "http://127.0.0.1:8000";
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
+
+function productNameFromSymbol(symbol: string): string {
+  const raw = symbol.includes("@") ? symbol.split("@")[1] : symbol;
+  const code = (raw.includes(".") ? raw.split(".")[1] : raw).replace(/\d+$/, "");
+  const map: Record<string, string> = {
+    wr: "线材",
+    ni: "沪镍",
+    ec: "集运欧线",
+    lc: "碳酸锂",
+    fu: "燃料油",
+    eg: "乙二醇",
+    lu: "低硫燃油",
+    rb: "螺纹钢",
+    au: "黄金",
+    ag: "白银",
+    cu: "沪铜",
+    al: "沪铝",
+    zn: "沪锌",
+    pb: "沪铅",
+    sn: "沪锡",
+    ru: "橡胶",
+    bu: "沥青",
+    sp: "纸浆",
+    ss: "不锈钢",
+    hc: "热卷",
+    sc: "原油",
+    nr: "20号胶",
+    bc: "国际铜",
+    i: "铁矿石",
+    j: "焦炭",
+    jm: "焦煤",
+    m: "豆粕",
+    y: "豆油",
+    p: "棕榈油",
+    l: "塑料",
+    v: "PVC",
+    pp: "聚丙烯",
+    pg: "LPG",
+    jd: "鸡蛋",
+    lh: "生猪",
+    si: "工业硅",
+    ps: "多晶硅",
+    MA: "甲醇",
+    TA: "PTA",
+    SA: "纯碱",
+    FG: "玻璃",
+    SR: "白糖",
+    CF: "棉花",
+    RM: "菜粕",
+    OI: "菜油",
+    AP: "苹果",
+    CJ: "红枣",
+  };
+  const name = map[code] || map[code.toLowerCase()] || map[code.toUpperCase()] || code;
+  return symbol.startsWith("KQ.m@") ? `${name}主连` : name;
+}
+
+async function registerForPush(apiBase: string): Promise<string> {
+  if (!Device.isDevice) {
+    return "模拟器无法注册推送";
+  }
+  const { status: existing } = await Notifications.getPermissionsAsync();
+  let finalStatus = existing;
+  if (existing !== "granted") {
+    const { status } = await Notifications.requestPermissionsAsync();
+    finalStatus = status;
+  }
+  if (finalStatus !== "granted") {
+    return "未授予通知权限";
+  }
+
+  if (Platform.OS === "android") {
+    await Notifications.setNotificationChannelAsync("alerts", {
+      name: "形态告警",
+      importance: Notifications.AndroidImportance.MAX,
+      vibrationPattern: [0, 250, 250, 250],
+      lightColor: "#E8B86D",
+    });
+  }
+
+  const projectId =
+    Constants.easConfig?.projectId ??
+    Constants.expoConfig?.extra?.eas?.projectId;
+  const tokenResp = await Notifications.getExpoPushTokenAsync(
+    projectId ? { projectId } : undefined
+  );
+  const token = tokenResp.data;
+  const resp = await fetch(`${apiBase.replace(/\/$/, "")}/api/devices/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, platform: Platform.OS }),
+  });
+  if (!resp.ok) {
+    throw new Error(`注册推送失败 HTTP ${resp.status}`);
+  }
+  return `已注册推送 ${token.slice(0, 18)}…`;
+}
 
 function App() {
   const [apiBase, setApiBase] = useState(DEFAULT_API);
@@ -32,6 +149,7 @@ function App() {
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [pushStatus, setPushStatus] = useState("推送未注册");
   const knownIds = useRef<Set<string>>(new Set());
   const appState = useRef(AppState.currentState);
 
@@ -71,6 +189,15 @@ function App() {
     }
   }, [base]);
 
+  const setupPush = useCallback(async () => {
+    try {
+      const msg = await registerForPush(base);
+      setPushStatus(msg);
+    } catch (e) {
+      setPushStatus(e instanceof Error ? e.message : String(e));
+    }
+  }, [base]);
+
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
@@ -79,6 +206,7 @@ function App() {
     knownIds.current = new Set();
     setLoading(true);
     fetchAlerts();
+    setupPush();
     const timer = setInterval(fetchAlerts, 15000);
     const sub = AppState.addEventListener("change", (next) => {
       if (appState.current.match(/inactive|background/) && next === "active") {
@@ -90,7 +218,7 @@ function App() {
       clearInterval(timer);
       sub.remove();
     };
-  }, [fetchAlerts]);
+  }, [fetchAlerts, setupPush]);
 
   return (
     <SafeAreaView style={styles.root}>
@@ -119,7 +247,8 @@ function App() {
             <Text style={styles.btnText}>刷新</Text>
           </Pressable>
         </View>
-        <Text style={styles.meta}>打开后每 15 秒刷新一次告警</Text>
+        <Text style={styles.meta}>打开后每 15 秒刷新列表。K线时间≠发现时间。</Text>
+        <Text style={styles.meta}>{pushStatus}</Text>
         {error ? <Text style={styles.error}>连接失败：{error}</Text> : null}
       </View>
 
@@ -131,17 +260,24 @@ function App() {
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.list}
           ListEmptyComponent={
-            <Text style={styles.empty}>暂无告警。出现头肩形态后会推到这里。</Text>
+            <Text style={styles.empty}>暂无告警。新形态出现后会推到这里和通知栏。</Text>
           }
-          renderItem={({ item }) => (
-            <View style={[styles.alert, item.read ? null : styles.alertNew]}>
-              <Text style={styles.alertTitle}>
-                {item.symbol} · {item.kind}
-              </Text>
-              <Text style={styles.alertTime}>{item.bar_time}</Text>
-              <Text style={styles.alertReason}>{item.reason}</Text>
-            </View>
-          )}
+          renderItem={({ item }) => {
+            const name = item.extra?.name || productNameFromSymbol(item.symbol);
+            const duration = item.extra?.duration ? ` · ${item.extra.duration}` : "";
+            return (
+              <View style={[styles.alert, item.read ? null : styles.alertNew]}>
+                <Text style={styles.alertTitle}>
+                  {name}
+                  {duration} · {item.kind}
+                </Text>
+                <Text style={styles.alertCode}>{item.symbol}</Text>
+                <Text style={styles.alertTime}>K线时间 {item.bar_time}</Text>
+                <Text style={styles.alertTime}>发现时间 {item.created_at}</Text>
+                <Text style={styles.alertReason}>{item.reason}</Text>
+              </View>
+            );
+          }}
         />
       )}
     </SafeAreaView>
@@ -198,6 +334,7 @@ const styles = StyleSheet.create({
   },
   alertNew: { borderLeftColor: "#E8B86D" },
   alertTitle: { color: "#F4F0E8", fontSize: 16, fontWeight: "700" },
+  alertCode: { color: "#7A8B9A", marginTop: 2, fontSize: 11 },
   alertTime: { color: "#9BB0C1", marginTop: 4, fontSize: 12 },
   alertReason: { color: "#D7E0E8", marginTop: 8, lineHeight: 20 },
 });
