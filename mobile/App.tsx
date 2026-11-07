@@ -29,6 +29,7 @@ type AlertItem = {
     duration?: string;
     name?: string;
     display?: string;
+    code?: string;
     duration_sec?: number;
   };
 };
@@ -263,7 +264,8 @@ function App() {
             <Text style={styles.empty}>暂无告警。新形态出现后会推到这里和通知栏。</Text>
           }
           renderItem={({ item }) => {
-            const name = item.extra?.name || productNameFromSymbol(item.symbol);
+            const code = item.extra?.code || item.symbol;
+            const name = item.extra?.name || productNameFromSymbol(code);
             const duration = item.extra?.duration ? ` · ${item.extra.duration}` : "";
             return (
               <View style={[styles.alert, item.read ? null : styles.alertNew]}>
@@ -271,7 +273,7 @@ function App() {
                   {name}
                   {duration} · {item.kind}
                 </Text>
-                <Text style={styles.alertCode}>{item.symbol}</Text>
+                <Text style={styles.alertCode}>{code}</Text>
                 <Text style={styles.alertTime}>K线时间 {item.bar_time}</Text>
                 <Text style={styles.alertTime}>发现时间 {item.created_at}</Text>
                 <Text style={styles.alertReason}>{item.reason}</Text>
