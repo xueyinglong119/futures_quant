@@ -195,7 +195,13 @@ function App() {
       const msg = await registerForPush(base);
       setPushStatus(msg);
     } catch (e) {
-      setPushStatus(e instanceof Error ? e.message : String(e));
+      // FCM/Firebase 未配置时 Expo 会抛英文长错误；列表轮询仍可用，不展示干扰信息
+      const raw = e instanceof Error ? e.message : String(e);
+      const isFcm =
+        /FirebaseApp|fcm-credentials|getExpoPushTokenAsync|Default FirebaseApp/i.test(
+          raw
+        );
+      setPushStatus(isFcm ? "" : raw);
     }
   }, [base]);
 
@@ -249,7 +255,7 @@ function App() {
           </Pressable>
         </View>
         <Text style={styles.meta}>打开后每 15 秒刷新列表。K线时间≠发现时间。</Text>
-        <Text style={styles.meta}>{pushStatus}</Text>
+        {pushStatus ? <Text style={styles.meta}>{pushStatus}</Text> : null}
         {error ? <Text style={styles.error}>连接失败：{error}</Text> : null}
       </View>
 
