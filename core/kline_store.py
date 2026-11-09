@@ -65,17 +65,27 @@ DOWNLOADABLE_DURATIONS = [
     DURATION_1W,
 ]
 
-# 实时/同步入库应对齐行情软件「更多周期」：上表全部 + 月/季/年
-INGEST_DURATIONS = list(DOWNLOADABLE_DURATIONS)
+# 30m/1h/2h/3h/4h 不按天勤整点入库，改由 1m 按国内交易时段合成
+# 日盘标注：1h=10:00/11:15/14:15/15:00；2h=11:15/15:00；3h=14:15/15:00；4h=15:00
+SESSION_BUILT_DURATIONS = (
+    DURATION_30M,
+    DURATION_1H,
+    DURATION_2H,
+    DURATION_3H,
+    DURATION_4H,
+)
+
+# 实时订阅/直接入库：去掉会话合成周期，避免整点 11:00 覆盖 11:15
+INGEST_DURATIONS = [
+    d for d in DOWNLOADABLE_DURATIONS if d not in SESSION_BUILT_DURATIONS
+]
 AGGREGATE_FROM_DAILY = [DURATION_1MON, DURATION_1Q, DURATION_1Y]
 
-# 历史补洞：相对早期只跑 1m/5m 时缺的可下载周期
+# 历史补洞：相对早期只跑 1m/5m 时缺的可下载周期（不含会话合成的 2/3/4h）
 DOWNLOAD_GAP_DURATIONS = [
     DURATION_3M,
     DURATION_10M,
     DURATION_15M,
-    DURATION_3H,
-    DURATION_4H,
 ]
 
 CREATE_TABLE_SQL = f"""
@@ -188,10 +198,30 @@ def load_bars(
     symbol: str,
     duration_sec: int,
     limit: int | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
-        if limit is not None and limit > 0:
+        if limit is not None and limit > 0 and start is None and end is None:
             cur.execute(SELECT_BARS_TAIL_SQL, (symbol, duration_sec, int(limit)))
+        elif start is not None or end is not None:
+            clauses = ["symbol=%s", "duration_sec=%s"]
+            params: list[Any] = [symbol, duration_sec]
+            if start is not None:
+                clauses.append("datetime_end>=%s")
+                params.append(start)
+            if end is not None:
+                clauses.append("datetime_end<=%s")
+                params.append(end)
+            sql = (
+                f"SELECT datetime_end, open, high, low, close, volume, open_oi "
+                f"FROM `{TABLE_NAME}` WHERE {' AND '.join(clauses)} "
+                f"ORDER BY datetime_end"
+            )
+            if limit is not None and limit > 0:
+                sql += " LIMIT %s"
+                params.append(int(limit))
+            cur.execute(sql, params)
         else:
             cur.execute(SELECT_BARS_SQL, (symbol, duration_sec))
         rows = cur.fetchall()

@@ -54,6 +54,65 @@ NIGHT_1H_BAR_DEFS: list[tuple[time, list[tuple[time, time]]]] = [
     (time(23, 0), [(time(22, 0), time(23, 0))]),
 ]
 
+# 2 小时：相邻两根会话 1h 合并（日盘约 120/105 分钟）
+DAY_2H_BAR_DEFS: list[tuple[time, list[tuple[time, time]]]] = [
+    (
+        time(11, 15),
+        [
+            (time(9, 0), time(10, 0)),
+            (time(10, 0), time(10, 15)),
+            (time(10, 30), time(11, 15)),
+        ],
+    ),
+    (
+        time(15, 0),
+        [
+            (time(11, 15), time(11, 30)),
+            (time(13, 30), time(15, 0)),
+        ],
+    ),
+]
+
+NIGHT_2H_BAR_DEFS: list[tuple[time, list[tuple[time, time]]]] = [
+    (time(23, 0), [(time(21, 0), time(23, 0))]),
+]
+
+# 3 小时：前三根会话 1h + 日盘末根剩余
+DAY_3H_BAR_DEFS: list[tuple[time, list[tuple[time, time]]]] = [
+    (
+        time(14, 15),
+        [
+            (time(9, 0), time(10, 0)),
+            (time(10, 0), time(10, 15)),
+            (time(10, 30), time(11, 15)),
+            (time(11, 15), time(11, 30)),
+            (time(13, 30), time(14, 15)),
+        ],
+    ),
+    (time(15, 0), [(time(14, 15), time(15, 0))]),
+]
+
+NIGHT_3H_BAR_DEFS: list[tuple[time, list[tuple[time, time]]]] = [
+    # 夜盘仅 120 分钟，仍落一根标注 23:00，避免夜盘数据丢失
+    (time(23, 0), [(time(21, 0), time(23, 0))]),
+]
+
+# 4 小时：整段日盘一根（有效约 225 分钟 < 240）
+DAY_4H_BAR_DEFS: list[tuple[time, list[tuple[time, time]]]] = [
+    (
+        time(15, 0),
+        [
+            (time(9, 0), time(10, 15)),
+            (time(10, 30), time(11, 30)),
+            (time(13, 30), time(15, 0)),
+        ],
+    ),
+]
+
+NIGHT_4H_BAR_DEFS: list[tuple[time, list[tuple[time, time]]]] = [
+    (time(23, 0), [(time(21, 0), time(23, 0))]),
+]
+
 
 @dataclass(frozen=True)
 class SessionBarDef:
@@ -86,6 +145,48 @@ def get_night_1h_bar_defs() -> list[SessionBarDef]:
     return [
         SessionBarDef(label=label, segments=tuple(segs))
         for label, segs in NIGHT_1H_BAR_DEFS
+    ]
+
+
+def get_day_2h_bar_defs() -> list[SessionBarDef]:
+    return [
+        SessionBarDef(label=label, segments=tuple(segs))
+        for label, segs in DAY_2H_BAR_DEFS
+    ]
+
+
+def get_night_2h_bar_defs() -> list[SessionBarDef]:
+    return [
+        SessionBarDef(label=label, segments=tuple(segs))
+        for label, segs in NIGHT_2H_BAR_DEFS
+    ]
+
+
+def get_day_3h_bar_defs() -> list[SessionBarDef]:
+    return [
+        SessionBarDef(label=label, segments=tuple(segs))
+        for label, segs in DAY_3H_BAR_DEFS
+    ]
+
+
+def get_night_3h_bar_defs() -> list[SessionBarDef]:
+    return [
+        SessionBarDef(label=label, segments=tuple(segs))
+        for label, segs in NIGHT_3H_BAR_DEFS
+    ]
+
+
+def get_day_4h_bar_defs() -> list[SessionBarDef]:
+    return [
+        SessionBarDef(label=label, segments=tuple(segs))
+        for label, segs in DAY_4H_BAR_DEFS
+    ]
+
+
+def get_night_4h_bar_defs() -> list[SessionBarDef]:
+    return [
+        SessionBarDef(label=label, segments=tuple(segs))
+        for label, segs in NIGHT_4H_BAR_DEFS
     ]
 
 
@@ -138,6 +239,30 @@ def get_day_1h_schedule_text() -> str:
     )
 
 
+def get_day_2h_schedule_text() -> str:
+    return _schedule_text(
+        "国内商品期货 2 小时 K 线：合并相邻会话 1h，datetime_end 为盘面标注时刻",
+        get_day_2h_bar_defs(),
+        get_night_2h_bar_defs(),
+    )
+
+
+def get_day_3h_schedule_text() -> str:
+    return _schedule_text(
+        "国内商品期货 3 小时 K 线：前三根会话 1h + 日盘末根剩余",
+        get_day_3h_bar_defs(),
+        get_night_3h_bar_defs(),
+    )
+
+
+def get_day_4h_schedule_text() -> str:
+    return _schedule_text(
+        "国内商品期货 4 小时 K 线：整段日盘一根（约 225 分钟）",
+        get_day_4h_bar_defs(),
+        get_night_4h_bar_defs(),
+    )
+
+
 def _combine(dt: date, t: time) -> datetime:
     return datetime.combine(dt, t)
 
@@ -180,6 +305,29 @@ def get_session_1h_trigger_minutes() -> frozenset[time]:
             time(21, 59),
             time(22, 59),
         }
+    )
+
+
+def get_session_2h_trigger_minutes() -> frozenset[time]:
+    return frozenset({time(11, 14), time(14, 59), time(22, 59)})
+
+
+def get_session_3h_trigger_minutes() -> frozenset[time]:
+    return frozenset({time(14, 14), time(14, 59), time(22, 59)})
+
+
+def get_session_4h_trigger_minutes() -> frozenset[time]:
+    return frozenset({time(14, 59), time(22, 59)})
+
+
+def get_all_session_trigger_minutes() -> frozenset[time]:
+    """任一会话周期（30m/1h/2h/3h/4h）可能收盘的 1m 时刻。"""
+    return (
+        get_session_bar_trigger_minutes()
+        | get_session_1h_trigger_minutes()
+        | get_session_2h_trigger_minutes()
+        | get_session_3h_trigger_minutes()
+        | get_session_4h_trigger_minutes()
     )
 
 
@@ -270,6 +418,60 @@ def aggregate_session_1h_bars(
         trade_date,
         get_day_1h_bar_defs(),
         get_night_1h_bar_defs(),
+        time_label=time_label,
+        include_night=include_night,
+    )
+
+
+def aggregate_session_2h_bars(
+    minute_bars: list[dict],
+    trade_date: date,
+    *,
+    time_label: str = "end",
+    include_night: bool = True,
+) -> list[dict]:
+    """从 1 分钟按国内期货 2 小时规则合成（日盘 2 根 + 夜盘 1 根）。"""
+    return aggregate_session_tf_bars(
+        minute_bars,
+        trade_date,
+        get_day_2h_bar_defs(),
+        get_night_2h_bar_defs(),
+        time_label=time_label,
+        include_night=include_night,
+    )
+
+
+def aggregate_session_3h_bars(
+    minute_bars: list[dict],
+    trade_date: date,
+    *,
+    time_label: str = "end",
+    include_night: bool = True,
+) -> list[dict]:
+    """从 1 分钟按国内期货 3 小时规则合成。"""
+    return aggregate_session_tf_bars(
+        minute_bars,
+        trade_date,
+        get_day_3h_bar_defs(),
+        get_night_3h_bar_defs(),
+        time_label=time_label,
+        include_night=include_night,
+    )
+
+
+def aggregate_session_4h_bars(
+    minute_bars: list[dict],
+    trade_date: date,
+    *,
+    time_label: str = "end",
+    include_night: bool = True,
+) -> list[dict]:
+    """从 1 分钟按国内期货 4 小时规则合成（日盘整段 1 根）。"""
+    return aggregate_session_tf_bars(
+        minute_bars,
+        trade_date,
+        get_day_4h_bar_defs(),
+        get_night_4h_bar_defs(),
         time_label=time_label,
         include_night=include_night,
     )

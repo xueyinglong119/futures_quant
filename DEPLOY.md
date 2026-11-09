@@ -61,6 +61,27 @@ python -u scripts/monitor_all_mains_hs.py --once --watchlist --durations "30m,1h
 python -u scripts/monitor_all_mains_hs.py --interval 60
 ```
 
+**30m / 1h / 2h / 3h / 4h 按交易时段入库**（跨 10:15–10:30 小节休市；不再用天勤整点）。日盘标注：
+
+- 1h: `10:00 / 11:15 / 14:15 / 15:00`
+- 2h: `11:15 / 15:00`
+- 3h: `14:15 / 15:00`
+- 4h: `15:00`
+
+历史重算：
+
+```bash
+# 先看规则
+python scripts/rebuild_session_klines.py --show-schedule
+# 只重建 2h/3h/4h，或全量会话周期
+python scripts/rebuild_session_klines.py --all --tfs 2h,3h,4h --execute
+python scripts/rebuild_session_klines.py --all --execute
+# 或
+python scripts/sync_all_main_klines.py --mode rebuild-session
+```
+
+实时链路在 1 分钟收盘后会按同样规则合成这些周期，不再订阅天勤整点 30m/1h/2h/3h/4h。
+
 若 `docker compose build` 拉 `python:3.11-slim-bookworm` 超时，在 `/etc/docker/daemon.json` 配好阿里云镜像加速器后执行 `systemctl restart docker`，再重新 build。
 
 安全组入方向放行 **TCP 8000**。

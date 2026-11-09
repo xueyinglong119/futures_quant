@@ -25,8 +25,8 @@ from core.kline_store import DURATION_1M, DURATION_5M, DURATION_LABELS, load_bar
 from utils.symbols import get_display_name
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-# 这几个周期在库里按 UTC 裸时间存放，日切时要加 8 小时
-UTC_DURATIONS = {1800, 3600, 7200, 10800, 14400}
+# 30m/1h/2h/3h/4h 已改为会话北京标注，不再按 UTC 裸时间
+UTC_DURATIONS: set[int] = set()
 
 INITIAL_CASH = 50_000.0
 MARGIN_ADD = 0.01

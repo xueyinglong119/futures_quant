@@ -2,14 +2,17 @@
 同步全主力主连多周期 K 线到 MySQL（future_ai.kline_bars）
 
 周期对齐常见软件:
-  日/周/月/季/年 + 1/3/5/10/15/30分 + 1/2/3/4小时
+  日/周/月/季/年 + 1/3/5/10/15分
+  30m/1h/2h/3h/4h 不按天勤整点拉取，改由 1m 按交易时段合成
+  （日盘 1h：10:00/11:15/14:15/15:00；2h：11:15/15:00；3h：14:15/15:00；4h：15:00）
 
 用法示例:
   python scripts/sync_all_main_klines.py --mode live
   python scripts/sync_all_main_klines.py --mode download
-  python scripts/sync_all_main_klines.py --mode download --durations 3m,10m,15m,3h,4h
+  python scripts/sync_all_main_klines.py --mode download --durations 3m,10m,15m
   python scripts/sync_all_main_klines.py --mode aggregate-htf
   python scripts/sync_all_main_klines.py --mode summary
+  python scripts/rebuild_session_klines.py --all --tfs 2h,3h,4h --execute
 """
 
 from __future__ import annotations
@@ -41,19 +44,18 @@ from core.kline_fetch import (
 from core.kline_store import (
     DOWNLOAD_GAP_DURATIONS,
     DURATION_1D,
-    DURATION_1H,
     DURATION_1M,
     DURATION_1MON,
+    DURATION_3M,
     DURATION_1Q,
     DURATION_1W,
     DURATION_1Y,
-    DURATION_2H,
-    DURATION_3H,
-    DURATION_4H,
     DURATION_5M,
-    DURATION_30M,
+    DURATION_10M,
+    DURATION_15M,
     DURATION_LABELS,
     LABEL_TO_DURATION,
+    SESSION_BUILT_DURATIONS,
     connect,
     count_bars,
     ensure_table,
@@ -61,14 +63,10 @@ from core.kline_store import (
     load_bars,
     upsert_bars,
 )
+from core.session_rebuild import ALL_SESSION_TFS, rebuild_symbol_session_klines
 
-# 直播可覆盖的中长周期
+# 直播可覆盖的中长周期（不含会话合成的 30m/1h/2h/3h/4h）
 LIVE_DURATIONS: list[tuple[int, int]] = [
-    (DURATION_30M, 8000),
-    (DURATION_1H, 5000),
-    (DURATION_2H, 4000),
-    (DURATION_3H, 3000),
-    (DURATION_4H, 2500),
     (DURATION_1D, 800),
     (DURATION_1W, 150),
 ]
@@ -84,8 +82,49 @@ def _parse_durations(raw: str | None, default: list[int]) -> list[int]:
             continue
         if key not in LABEL_TO_DURATION:
             raise SystemExit(f"未知周期: {key}，可选: {', '.join(DURATION_LABELS.values())}")
-        out.append(LABEL_TO_DURATION[key])
+        dur = LABEL_TO_DURATION[key]
+        if dur in SESSION_BUILT_DURATIONS:
+            print(
+                f"跳过 {key}：会话周期请用 scripts/rebuild_session_klines.py 从 1m 合成",
+                flush=True,
+            )
+            continue
+        out.append(dur)
     return out
+
+
+def sync_session_from_1m(symbols: list[str] | None = None) -> None:
+    """用库内 1m 按交易时段重写 30m/1h/2h/3h/4h（覆盖天勤整点口径）。"""
+    conn = connect()
+    ensure_table(conn)
+    try:
+        syms = symbols or list_symbols(conn, DURATION_1M)
+        print(
+            f"\n=== rebuild session {','.join(ALL_SESSION_TFS)} from 1m "
+            f"symbols={len(syms)} ===",
+            flush=True,
+        )
+        totals = {tf: 0 for tf in ALL_SESSION_TFS}
+        for i, symbol in enumerate(syms, 1):
+            stats = rebuild_symbol_session_klines(
+                conn, symbol, tfs=ALL_SESSION_TFS, execute=True
+            )
+            for tf in totals:
+                totals[tf] += stats.get(f"{tf}_upserted", 0)
+            ups = " ".join(
+                f"up{tf}={stats.get(f'{tf}_upserted', 0)}" for tf in ALL_SESSION_TFS
+            )
+            print(
+                f"[{i}/{len(syms)}] {symbol} 1m={stats.get('1m_used', 0)} {ups}",
+                flush=True,
+            )
+        print(
+            "session rebuild done upsert "
+            + " ".join(f"{tf}={n}" for tf, n in totals.items()),
+            flush=True,
+        )
+    finally:
+        conn.close()
 
 
 def sync_live(
@@ -282,14 +321,16 @@ def main() -> None:
             "download",
             "download-gap",
             "aggregate-htf",
+            "rebuild-session",
             "backfill-1m",
             "all",
             "summary",
         ],
         default="live",
         help=(
-            "live=中长周期; download=专业版下载; download-gap=补3/10/15分与3/4小时; "
-            "aggregate-htf=日线聚月季年"
+            "live=中长周期(不含30m/1h); download=专业版下载; "
+            "download-gap=补3/10/15分与3/4小时; aggregate-htf=日线聚月季年; "
+            "rebuild-session=1m合成会话30m/1h"
         ),
     )
     parser.add_argument("--years", type=float, default=2.0, help="回溯年数，默认 2")
@@ -313,6 +354,16 @@ def main() -> None:
             else None
         )
         sync_aggregate_htf(symbols)
+        print_summary()
+        return
+
+    if args.mode == "rebuild-session":
+        symbols = (
+            [s.strip() for s in args.symbols.split(",") if s.strip()]
+            if args.symbols
+            else None
+        )
+        sync_session_from_1m(symbols)
         print_summary()
         return
 
@@ -363,6 +414,7 @@ def main() -> None:
             ),
         )
         sync_aggregate_htf(symbols)
+        sync_session_from_1m(symbols)
     if args.mode == "backfill-1m":
         sync_backfill_1m(
             symbols,
@@ -371,6 +423,7 @@ def main() -> None:
             settings,
             also_5m=not args.no_5m_agg,
         )
+        sync_session_from_1m(symbols)
 
     print_summary()
 

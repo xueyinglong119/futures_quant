@@ -1,7 +1,10 @@
 """开盘实时链路：订阅 K 线 → 收盘写入 MySQL → 头肩检测告警。
 
-入库周期对齐行情软件「更多周期」：1/3/5/10/15/30分、1/2/3/4小时、日/周；
-月/季/年在日线收盘后由日线聚合写入。头肩仍只跑 HS_MONITOR_DURATIONS。
+入库周期：1/3/5/10/15 分、日/周（直接订阅天勤）。
+30m/1h/2h/3h/4h 不按天勤整点写库，而在 1 分钟收盘后按国内交易时段从 1m 合成：
+  日盘 1h: 10:00 / 11:15 / 14:15 / 15:00
+  日盘 2h: 11:15 / 15:00；3h: 14:15 / 15:00；4h: 15:00
+月/季/年在日线收盘后由日线聚合。头肩仍只跑 HS_MONITOR_DURATIONS。
 
 只把已经走完的 K 线入库。正在走的那根只留在行情里，收盘后下一拍写入。
 时间戳沿用该品种该周期库里已有的钟（UTC 或北京时间），避免同一根 K 线写两遍。
@@ -37,34 +40,39 @@ from core.kline_fetch import (
 from core.paper_trade import PaperBroker
 from core.kline_store import (
     DURATION_1D,
+    DURATION_1M,
     DURATION_1MON,
     DURATION_1Q,
     DURATION_1Y,
     DURATION_LABELS,
     INGEST_DURATIONS,
+    SESSION_BUILT_DURATIONS,
     connect,
     ensure_table,
     load_bars,
     upsert_bars,
 )
+from core.session_rebuild import refresh_symbol_session_recent
+from utils.trading_session import get_all_session_trigger_minutes
 
 TZ = ZoneInfo("Asia/Shanghai")
 
-# 覆盖周五收盘到周一上午的缺口；各入库周期订阅长度
+# 覆盖周五收盘到周一上午的缺口；各入库周期订阅长度（不含会话合成周期）
 TAIL_LENGTH: dict[int, int] = {
     60: 2000,       # 1m
     180: 1200,      # 3m
     300: 800,       # 5m
     600: 600,       # 10m
     900: 500,       # 15m
-    1800: 400,      # 30m
-    3600: 300,      # 1h
-    7200: 200,      # 2h
-    10800: 160,     # 3h
-    14400: 140,     # 4h
     86400: 80,      # 1d
     604800: 60,     # 1w
 }
+
+# 1m 走到这些北京时刻时，刷新会话 30m/1h/2h/3h/4h
+_SESSION_REFRESH_MINUTES = get_all_session_trigger_minutes()
+_SESSION_HS_DURS = tuple(
+    d for d in SESSION_BUILT_DURATIONS if d in HS_MONITOR_DURATIONS
+)
 
 
 def in_trading_window(now: datetime) -> bool:
@@ -271,9 +279,15 @@ class RealtimePipeline:
                             f"{DURATION_LABELS.get(dur, dur)}: {exc}",
                             flush=True,
                         )
-            print(f"[pipeline] 已订阅 {len(serials)} 条序列，等待行情...", flush=True)
+            print(
+                f"[pipeline] 已订阅 {len(serials)} 条序列"
+                f"（30m/1h/2h/3h/4h 由 1m 按交易时段合成），等待行情...",
+                flush=True,
+            )
             wait_klines_ready(api, list(serials.values()), timeout_sec=300)
             self._catch_up(conn, serials)
+            # 启动时用 1m 覆盖最近会话 30m/1h，清掉历史整点口径
+            self._bootstrap_session_bars(conn, symbols)
             while in_trading_window(datetime.now(TZ)):
                 api.wait_update(deadline=time_monotonic_deadline(api, 5))
                 changed = [key for key, kl in serials.items() if api.is_changing(kl)]
@@ -387,6 +401,8 @@ class RealtimePipeline:
             )
         if any(not r.get("correction") for r in fresh) and duration_sec == DURATION_1D:
             _refresh_htf_from_daily(conn, symbol)
+        if duration_sec == DURATION_1M:
+            self._maybe_refresh_session_from_1m(conn, symbol, fresh)
         label = DURATION_LABELS.get(duration_sec, str(duration_sec))
         if alerts:
             print(
@@ -394,6 +410,117 @@ class RealtimePipeline:
                 flush=True,
             )
         return len(fresh), alerts
+
+    def _bootstrap_session_bars(self, conn, symbols: list[str]) -> None:
+        """启动补齐后，用 1m 重算各品种最近会话 30m/1h/2h/3h/4h。"""
+        totals = {k: 0 for k in ("30m", "1h", "2h", "3h", "4h")}
+        for symbol in symbols:
+            try:
+                stats = refresh_symbol_session_recent(
+                    conn, symbol, around=datetime.now(TZ).replace(tzinfo=None)
+                )
+                for key in totals:
+                    totals[key] += int(stats.get(f"{key}_upserted") or 0)
+                # 刷新头肩检测窗口（若该周期在监控列表）
+                for dur in _SESSION_HS_DURS:
+                    frame = load_tf_df(symbol, dur, conn=conn)
+                    if frame is None or frame.empty:
+                        continue
+                    state = self._states.get((symbol, dur))
+                    if state is None:
+                        state = _SeriesState(clock="beijing")
+                        self._states[(symbol, dur)] = state
+                    state.frame = frame
+                    state.clock = "beijing"
+                    state.watermark = _as_naive(
+                        pd.Timestamp(frame.iloc[-1]["datetime"]).to_pydatetime()
+                    )
+                    state.last_payload = _frame_last_bar(frame)
+                    self.engine._last_bar_dt[
+                        self.engine._key(symbol, dur)
+                    ] = state.watermark
+            except Exception:
+                traceback.print_exc()
+                print(f"[pipeline] 会话K重建失败 {symbol}", flush=True)
+        print(
+            "[pipeline] 会话K启动重建 upsert "
+            + " ".join(f"{k}={v}" for k, v in totals.items()),
+            flush=True,
+        )
+
+    def _maybe_refresh_session_from_1m(
+        self, conn, symbol: str, fresh_1m: list[dict]
+    ) -> None:
+        """1m 收盘落在小节边界时，重算并写入会话周期，再跑头肩。"""
+        need = False
+        pivot: datetime | None = None
+        for row in fresh_1m:
+            if row.get("correction"):
+                continue
+            stored = _as_naive(row["stored"])
+            # 统一到北京时刻判断触发点
+            bj = stored
+            if not _in_beijing_session(bj):
+                # 库内若是 UTC，换到北京再比
+                bj = stored + timedelta(hours=8)
+            if bj.time().replace(second=0, microsecond=0) in _SESSION_REFRESH_MINUTES:
+                need = True
+                pivot = bj
+        if not need or pivot is None:
+            return
+        try:
+            stats = refresh_symbol_session_recent(conn, symbol, around=pivot)
+        except Exception:
+            traceback.print_exc()
+            return
+        parts = []
+        for key in ("30m", "1h", "2h", "3h", "4h"):
+            n = int(stats.get(f"{key}_upserted") or 0)
+            if n:
+                parts.append(f"{key}={n}")
+        if parts:
+            print(
+                f"[pipeline] {symbol} 会话合成 {' '.join(parts)} @ {pivot:%H:%M}",
+                flush=True,
+            )
+        for dur in _SESSION_HS_DURS:
+            self._evaluate_session_tf(conn, symbol, dur)
+
+    def _evaluate_session_tf(self, conn, symbol: str, duration_sec: int) -> int:
+        """会话 K 写入后，刷新检测窗口并评估最新一根。"""
+        frame = load_tf_df(symbol, duration_sec, conn=conn)
+        if frame is None or frame.empty:
+            return 0
+        state = self._states.get((symbol, duration_sec))
+        if state is None:
+            state = _SeriesState(clock="beijing")
+            self._states[(symbol, duration_sec)] = state
+        last_dt = _as_naive(pd.Timestamp(frame.iloc[-1]["datetime"]).to_pydatetime())
+        last_payload = _frame_last_bar(frame)
+        prev_wm = state.watermark
+        state.frame = frame
+        state.clock = "beijing"
+        state.watermark = last_dt
+        state.last_payload = last_payload
+        if prev_wm is not None and last_dt <= prev_wm:
+            return 0
+        self.engine._last_bar_dt[self.engine._key(symbol, duration_sec)] = (
+            prev_wm if prev_wm is not None else last_dt - timedelta(seconds=1)
+        )
+        if self.broker is not None and last_payload is not None:
+            try:
+                self.broker.on_bar(symbol, duration_sec, last_dt, last_payload)
+            except Exception:
+                traceback.print_exc()
+        return self.engine.evaluate_df(
+            symbol,
+            duration_sec,
+            frame,
+            alert_log=self.alert_log,
+            push=True,
+            toast=False,
+            emit=True,
+        )
 
     def _load_state(
         self,
