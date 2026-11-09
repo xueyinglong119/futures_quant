@@ -20,7 +20,7 @@ from core.indicators import (
     latest_indicator_snapshot,
 )
 from core.kline_store import LABEL_TO_DURATION, connect, ensure_table, load_bars
-from core.paper_trade import account_snapshot, manual_close, trading_board
+from core.paper_trade import account_snapshot, alert_execution, manual_close, trading_board
 from core.market_data import DEFAULT_KLINE_SECONDS, get_today_klines
 from core.push_notify import send_alert_push
 
@@ -279,6 +279,16 @@ def api_list_alerts(
             title = f"{title} · {duration}"
         item["symbol"] = title
     return {"count": len(items), "alerts": items}
+
+
+@app.get("/api/alerts/{alert_id}/execution")
+def api_alert_execution(alert_id: str) -> dict[str, Any]:
+    """告警对应的模拟执行情况：开仓价/手数/止盈止损/浮动或净盈亏。"""
+    conn = connect()
+    try:
+        return alert_execution(conn, alert_id.strip())
+    finally:
+        conn.close()
 
 
 @app.post("/api/alerts/clear")

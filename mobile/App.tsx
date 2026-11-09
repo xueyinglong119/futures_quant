@@ -36,6 +36,37 @@ type AlertItem = {
   };
 };
 
+type ExecutionTrade = {
+  id: number;
+  name: string;
+  symbol: string;
+  duration: string;
+  side_text: string;
+  kind: string;
+  status: string;
+  open_time_bj: string;
+  open_price: number;
+  lots: number;
+  margin: number;
+  fee_open: number;
+  fee_close: number | null;
+  tp_price: number;
+  sl_price: number;
+  last_price: number | null;
+  close_time_bj?: string | null;
+  close_price: number | null;
+  close_reason: string | null;
+  net_pnl: number | null;
+  unrealized: number | null;
+  note: string;
+};
+
+type ExecutionDetail = {
+  opened: boolean;
+  trade: ExecutionTrade | null;
+  note: string;
+};
+
 type BoardTrade = {
   id: number;
   name: string;
@@ -414,27 +445,96 @@ function App() {
           ListEmptyComponent={
             <Text style={styles.empty}>暂无告警。新形态出现后会推到这里和通知栏。</Text>
           }
-          renderItem={({ item }) => {
-            const code = item.extra?.code || item.symbol;
-            const name = item.extra?.name || productNameFromSymbol(code);
-            const duration = item.extra?.duration ? ` · ${item.extra.duration}` : "";
-            return (
-              <View style={[styles.alert, item.read ? null : styles.alertNew]}>
-                <Text style={styles.alertTitle}>
-                  {name}
-                  {duration} · {item.kind}
-                </Text>
-                <Text style={styles.alertCode}>{code}</Text>
-                <Text style={styles.alertTime}>K线时间 {item.bar_time}</Text>
-                <Text style={styles.alertTime}>发现时间 {item.created_at}</Text>
-                <Text style={styles.alertReason}>{item.reason}</Text>
-              </View>
-            );
-          }}
+          renderItem={({ item }) => <AlertCard item={item} base={base} />}
         />
       )}
     </SafeAreaView>
   );
+}
+
+function AlertCard({ item, base }: { item: AlertItem; base: string }) {
+  const [open, setOpen] = useState(false);
+  const [detail, setDetail] = useState<ExecutionDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (!next || detail || loading) return;
+    setLoading(true);
+    setError("");
+    try {
+      const resp = await fetch(`${base}/api/alerts/${encodeURIComponent(item.id)}/execution`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      setDetail((await resp.json()) as ExecutionDetail);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const code = item.extra?.code || item.symbol;
+  const name = item.extra?.name || productNameFromSymbol(code);
+  const duration = item.extra?.duration ? ` · ${item.extra.duration}` : "";
+  const trade = detail?.trade;
+  return (
+    <Pressable style={[styles.alert, item.read ? null : styles.alertNew]} onPress={toggle}>
+      <Text style={styles.alertTitle}>
+        {name}
+        {duration} · {item.kind}
+      </Text>
+      <Text style={styles.alertCode}>{code}</Text>
+      <Text style={styles.alertTime}>K线时间 {item.bar_time}</Text>
+      <Text style={styles.alertTime}>发现时间 {item.created_at}</Text>
+      <Text style={styles.alertReason}>{item.reason}</Text>
+      <Text style={styles.detailHint}>{open ? "收起执行详情 ▲" : "查看执行详情 ▼"}</Text>
+      {open ? (
+        loading ? (
+          <ActivityIndicator color="#E8B86D" style={{ marginTop: 8 }} />
+        ) : error ? (
+          <Text style={styles.error}>执行详情加载失败：{error}</Text>
+        ) : detail ? (
+          <View style={styles.detailBox}>
+            <Text style={styles.detailNote}>{detail.note}</Text>
+            {trade ? (
+              <>
+                <Text style={styles.detailLine}>
+                  {trade.open_time_bj} {trade.side_text} {trade.open_price} × {trade.lots} 手　保证金 {Number(trade.margin).toFixed(0)}
+                </Text>
+                <Text style={styles.detailLine}>
+                  止盈 {trade.tp_price}　止损 {trade.sl_price}　开仓手续费 {Number(trade.fee_open).toFixed(2)}
+                </Text>
+                {trade.status === "open" ? (
+                  <>
+                    <Text style={styles.detailLine}>现价 {trade.last_price ?? "—"}</Text>
+                    <Text style={[styles.detailLine, { color: pnlColor(trade.unrealized) }]}>
+                      浮动盈亏 {moneyText(trade.unrealized)}
+                    </Text>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.detailLine}>
+                      平仓 {trade.close_time_bj || "—"}　{trade.close_price ?? "—"}　{trade.close_reason || ""}
+                    </Text>
+                    <Text style={[styles.detailLine, { color: pnlColor(trade.net_pnl) }]}>
+                      净盈亏 {moneyText(trade.net_pnl)}
+                    </Text>
+                  </>
+                )}
+              </>
+            ) : null}
+          </View>
+        ) : null
+      ) : null}
+    </Pressable>
+  );
+}
+
+function pnlColor(value: number | null | undefined): string {
+  if (value === null || value === undefined || value === 0) return "#F4F0E8";
+  return value > 0 ? "#FF6B6B" : "#3DDC97";
 }
 
 function BoardPane({
@@ -611,6 +711,15 @@ const styles = StyleSheet.create({
   alertCode: { color: "#7A8B9A", marginTop: 2, fontSize: 11 },
   alertTime: { color: "#9BB0C1", marginTop: 4, fontSize: 12 },
   alertReason: { color: "#D7E0E8", marginTop: 8, lineHeight: 20 },
+  detailHint: { color: "#E8B86D", marginTop: 8, fontSize: 12, fontWeight: "600" },
+  detailBox: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: "#2A4A66",
+  },
+  detailNote: { color: "#9BB0C1", fontSize: 12, marginBottom: 4 },
+  detailLine: { color: "#D7E0E8", marginTop: 4, fontSize: 13 },
   closeBtn: {
     alignSelf: "flex-start",
     marginTop: 10,

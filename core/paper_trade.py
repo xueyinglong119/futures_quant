@@ -82,9 +82,11 @@ CREATE TABLE IF NOT EXISTS `paper_trade` (
   `net_pnl` DOUBLE NULL,
   `equity_after_close` DOUBLE NULL,
   `reason` VARCHAR(255) NOT NULL,
+  `alert_id` VARCHAR(36) NULL COMMENT '触发本笔的告警 id',
   PRIMARY KEY (`id`),
   KEY `idx_status` (`status`),
-  KEY `idx_symbol_dur` (`symbol`, `duration_sec`, `status`)
+  KEY `idx_symbol_dur` (`symbol`, `duration_sec`, `status`),
+  KEY `idx_alert` (`alert_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='模拟成交'
 """
 
@@ -279,7 +281,15 @@ class PaperBroker:
         ensure_schema(conn)
         self._load()
 
-    def on_signal(self, symbol: str, duration_sec: int, when: datetime, df: Any, signal: Any) -> None:
+    def on_signal(
+        self,
+        symbol: str,
+        duration_sec: int,
+        when: datetime,
+        df: Any,
+        signal: Any,
+        alert_id: str | None = None,
+    ) -> None:
         self._sync_from_db()
         detail = getattr(signal, "detail", None) or {}
         side = str(detail.get("side") or "")
@@ -313,6 +323,7 @@ class PaperBroker:
             spec=spec,
             kind="头肩顶" if side == "short" else "头肩底",
             reason=str(getattr(signal, "reason", "") or ""),
+            alert_id=alert_id,
         )
 
     def on_bar(self, symbol: str, duration_sec: int, when: datetime, bar: dict) -> None:
@@ -350,6 +361,7 @@ class PaperBroker:
         spec: ContractSpec,
         kind: str,
         reason: str,
+        alert_id: str | None = None,
     ) -> None:
         rate, margin_lot = margin_quote(entry, spec.multiplier, spec.exchange_margin, spec.pre_settlement)
         notional = entry * spec.multiplier
@@ -381,14 +393,14 @@ class PaperBroker:
                   exchange_margin, margin_rate, margin,
                   exchange_fee, fee_per_lot, fee_open,
                   swing, extreme, head, tp_price, sl_price,
-                  equity_after_open, last_price, status, reason
+                  equity_after_open, last_price, status, reason, alert_id
                 ) VALUES (
                   %s,%s,%s,%s,%s,%s,
                   %s,%s,%s,%s,
                   %s,%s,%s,
                   %s,%s,%s,
                   %s,%s,%s,%s,%s,
-                  %s,%s,'open',%s
+                  %s,%s,'open',%s,%s
                 )
                 """,
                 (
@@ -397,7 +409,7 @@ class PaperBroker:
                     spec.exchange_margin, rate, margin,
                     spec.exchange_fee, fee_lot, fee_open,
                     swing, extreme, head, tp_price, sl_price,
-                    equity, entry, reason[:255],
+                    equity, entry, reason[:255], alert_id,
                 ),
             )
             trade_id = int(cur.lastrowid)
@@ -575,6 +587,21 @@ def ensure_schema(conn: Connection) -> None:
     with conn.cursor() as cur:
         cur.execute(CREATE_ACCOUNT_SQL)
         cur.execute(CREATE_TRADE_SQL)
+        cur.execute(
+            """
+            SELECT COUNT(*) AS n FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'paper_trade'
+              AND COLUMN_NAME = 'alert_id'
+            """
+        )
+        has_alert_id = int((cur.fetchone() or {}).get("n") or 0) > 0
+        if not has_alert_id:
+            cur.execute(
+                "ALTER TABLE paper_trade "
+                "ADD COLUMN `alert_id` VARCHAR(36) NULL COMMENT '触发本笔的告警 id', "
+                "ADD KEY `idx_alert` (`alert_id`)"
+            )
     conn.commit()
 
 
@@ -758,6 +785,45 @@ def manual_close(conn: Connection, trade_id: int) -> dict[str, Any]:
     }
 
 
+def alert_execution(conn: Connection, alert_id: str) -> dict[str, Any]:
+    """这条告警对应的模拟执行情况：开没开仓、开在哪、现在浮亏浮盈或净盈亏。"""
+    ensure_schema(conn)
+    cur = conn.cursor(DictCursor)
+    try:
+        cur.execute(
+            """
+            SELECT id, symbol, name, duration, duration_sec, side, kind, status,
+                   open_time, open_price, lots, multiplier, margin, margin_rate,
+                   fee_open, fee_close, swing, extreme, head, tp_price, sl_price,
+                   last_price, close_time, close_price, close_reason,
+                   gross_pnl, net_pnl, equity_after_open, equity_after_close, alert_id
+            FROM paper_trade WHERE alert_id=%s ORDER BY id
+            """,
+            (alert_id,),
+        )
+        rows = [_row(item) for item in cur.fetchall()]
+    finally:
+        cur.close()
+    if not rows:
+        return {"opened": False, "trade": None, "note": "这条告警没有开仓（可能该周期已有持仓或资金不够）"}
+    trade = rows[-1]
+    if trade.get("status") == "open":
+        mark = latest_mark_price(conn, str(trade["symbol"]), int(trade["duration_sec"]))
+        if mark is not None:
+            trade["last_price"] = mark
+        trade["unrealized"] = position_unrealized(trade)
+        trade["note"] = "持仓中"
+    else:
+        trade["unrealized"] = None
+        trade["note"] = f"已平仓（{trade.get('close_reason') or ''}）"
+    open_bj = beijing_clock(_parse_dt(trade["open_time"]), int(trade["duration_sec"]))
+    trade["open_time_bj"] = format_bj(open_bj)
+    if trade.get("close_time"):
+        close_bj = beijing_clock(_parse_dt(trade["close_time"]), int(trade["duration_sec"]))
+        trade["close_time_bj"] = format_bj(close_bj)
+    return {"opened": True, "trade": trade, "note": trade["note"]}
+
+
 def beijing_clock(when: datetime, duration_sec: int) -> datetime:
     """把库存时间换成北京时间。1 小时、30 分钟等按 UTC 存，其余已经是北京时间。"""
     base = when.replace(tzinfo=None, microsecond=0) if when.tzinfo else when.replace(microsecond=0)
@@ -797,7 +863,7 @@ def trading_board(conn: Connection, day: date | None = None) -> dict[str, Any]:
                    open_time, open_price, lots, fee_open, fee_close,
                    close_time, close_price, close_reason,
                    gross_pnl, net_pnl, equity_after_open, equity_after_close,
-                   tp_price, sl_price, margin, last_price, multiplier
+                   tp_price, sl_price, margin, last_price, multiplier, alert_id
             FROM paper_trade
             ORDER BY id
             """
@@ -941,6 +1007,7 @@ def _board_trade(row: dict[str, Any], open_bj: datetime, close_bj: datetime | No
         "close_reason": row.get("close_reason"),
         "tp_price": row.get("tp_price"),
         "sl_price": row.get("sl_price"),
+        "alert_id": row.get("alert_id"),
     }
 
 

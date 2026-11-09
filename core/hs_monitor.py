@@ -147,7 +147,8 @@ def emit_alert(
     alert_log: Path | None = None,
     push: bool = True,
     toast: bool = True,
-) -> None:
+) -> str | None:
+    """写告警并推送，返回告警 id，供模拟账户把这笔单和告警对上。"""
     label = DURATION_LABELS.get(duration_sec, str(duration_sec))
     name = get_display_name(symbol)
     title = f"{name} {label} {kind}"
@@ -165,6 +166,7 @@ def emit_alert(
     if toast:
         windows_toast(title, body)
 
+    alert_id: str | None = None
     try:
         alert = add_alert(
             symbol=symbol,
@@ -178,11 +180,13 @@ def emit_alert(
                 "display": f"{name}({symbol})",
             },
         )
+        alert_id = alert.id
         if push:
             push_result = send_alert_push(alert)
             print(f"App推送结果: {push_result}", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"写入/推送 App 告警失败: {exc}", flush=True)
+    return alert_id
 
 
 class HsMonitorEngine:
@@ -268,7 +272,7 @@ class HsMonitorEngine:
         if alert_key in self._alerted:
             return 0
         self._alerted.add(alert_key)
-        emit_alert(
+        alert_id = emit_alert(
             symbol=symbol,
             duration_sec=duration_sec,
             kind=kind,
@@ -280,7 +284,7 @@ class HsMonitorEngine:
         )
         if self.on_signal is not None:
             try:
-                self.on_signal(symbol, duration_sec, last_dt, df, signal)
+                self.on_signal(symbol, duration_sec, last_dt, df, signal, alert_id)
             except Exception as exc:  # noqa: BLE001
                 print(f"[paper] 开仓处理失败 {symbol}: {exc}", flush=True)
         return 1
