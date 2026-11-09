@@ -6,6 +6,7 @@ import {
   Platform,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
@@ -32,6 +33,45 @@ type AlertItem = {
     code?: string;
     duration_sec?: number;
   };
+};
+
+type BoardTrade = {
+  id: number;
+  name: string;
+  symbol: string;
+  duration: string;
+  side_text: string;
+  mark: string;
+  open_time: string;
+  close_time: string | null;
+  open_price: number;
+  close_price: number | null;
+  lots: number;
+  fee_open: number;
+  net_pnl: number | null;
+  close_reason: string | null;
+  tp_price: number;
+  sl_price: number;
+};
+
+type BoardData = {
+  today: string;
+  date: string;
+  days: string[];
+  summary: {
+    opened: number;
+    closed: number;
+    wins: number;
+    losses: number;
+    win_rate: number | null;
+    net_pnl: number;
+    fee: number;
+    equity: number | null;
+    unrealized: number | null;
+    open_positions: number | null;
+    is_today: boolean;
+  };
+  trades: BoardTrade[];
 };
 
 const STORAGE_API = "fq_api_base";
@@ -181,13 +221,23 @@ async function registerForPush(apiBase: string): Promise<string> {
   return `已注册推送 ${token.slice(0, 18)}…`;
 }
 
+function moneyText(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
 function App() {
+  const [tab, setTab] = useState<"alerts" | "board">("alerts");
   const [apiBase, setApiBase] = useState(DEFAULT_API);
   const [apiInput, setApiInput] = useState(DEFAULT_API);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [pushStatus, setPushStatus] = useState("推送未注册");
+  const [boardDay, setBoardDay] = useState("");
+  const [board, setBoard] = useState<BoardData | null>(null);
+  const [boardError, setBoardError] = useState("");
+  const [boardLoading, setBoardLoading] = useState(false);
   const knownIds = useRef<Set<string>>(new Set());
   const seeded = useRef(false);
   const appState = useRef(AppState.currentState);
@@ -237,6 +287,23 @@ function App() {
     }
   }, [base]);
 
+  const fetchBoard = useCallback(async (day?: string) => {
+    setBoardLoading(true);
+    try {
+      const query = day ? `?date=${encodeURIComponent(day)}` : "";
+      const resp = await fetch(`${base}/api/paper/board${query}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data: BoardData = await resp.json();
+      setBoard(data);
+      setBoardDay(data.date);
+      setBoardError("");
+    } catch (e) {
+      setBoardError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBoardLoading(false);
+    }
+  }, [base]);
+
   const setupPush = useCallback(async () => {
     try {
       const msg = await registerForPush(base);
@@ -281,6 +348,20 @@ function App() {
       <View style={styles.header}>
         <Text style={styles.brand}>期货形态告警</Text>
         <Text style={styles.sub}>头肩顶 / 头肩底 · 实时通知</Text>
+        <View style={styles.tabs}>
+          <Pressable style={[styles.tab, tab === "alerts" ? styles.tabOn : null]} onPress={() => setTab("alerts")}>
+            <Text style={styles.tabText}>告警</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.tab, tab === "board" ? styles.tabOn : null]}
+            onPress={() => {
+              setTab("board");
+              fetchBoard(boardDay || undefined);
+            }}
+          >
+            <Text style={styles.tabText}>看板</Text>
+          </Pressable>
+        </View>
       </View>
 
       <View style={styles.card}>
@@ -298,7 +379,10 @@ function App() {
           <Pressable style={styles.btn} onPress={saveApi}>
             <Text style={styles.btnText}>保存并连接</Text>
           </Pressable>
-          <Pressable style={[styles.btn, styles.btnGhost]} onPress={fetchAlerts}>
+          <Pressable
+            style={[styles.btn, styles.btnGhost]}
+            onPress={() => (tab === "board" ? fetchBoard(boardDay || undefined) : fetchAlerts())}
+          >
             <Text style={styles.btnText}>刷新</Text>
           </Pressable>
         </View>
@@ -307,7 +391,14 @@ function App() {
         {error ? <Text style={styles.error}>连接失败：{error}</Text> : null}
       </View>
 
-      {loading ? (
+      {tab === "board" ? (
+        <BoardPane
+          board={board}
+          loading={boardLoading}
+          error={boardError}
+          onSelect={(day) => fetchBoard(day)}
+        />
+      ) : loading ? (
         <ActivityIndicator color="#E8B86D" style={{ marginTop: 24 }} />
       ) : (
         <FlatList
@@ -340,6 +431,77 @@ function App() {
   );
 }
 
+function BoardPane({
+  board,
+  loading,
+  error,
+  onSelect,
+}: {
+  board: BoardData | null;
+  loading: boolean;
+  error: string;
+  onSelect: (day: string) => void;
+}) {
+  const summary = board?.summary;
+  return (
+    <ScrollView contentContainerStyle={styles.list}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.dayRow}>
+        {(board?.days ?? []).map((day) => (
+          <Pressable
+            key={day}
+            style={[styles.dayChip, day === board?.date ? styles.dayChipOn : null]}
+            onPress={() => onSelect(day)}
+          >
+            <Text style={styles.dayText}>{day === board?.today ? `今天 ${day.slice(5)}` : day}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+      {loading ? <ActivityIndicator color="#E8B86D" /> : null}
+      {error ? <Text style={styles.error}>看板加载失败：{error}</Text> : null}
+      {summary ? (
+        <View style={styles.statGrid}>
+          <Stat label="平仓净盈亏" value={moneyText(summary.net_pnl)} pnl={summary.net_pnl} />
+          <Stat label={summary.is_today ? "当前本金" : "当日最后本金"} value={summary.equity === null ? "—" : summary.equity.toFixed(2)} />
+          <Stat label="开仓 / 平仓" value={`${summary.opened} / ${summary.closed}`} />
+          <Stat label="胜率" value={summary.win_rate === null ? "—" : `${Math.round(summary.win_rate * 100)}%`} />
+          <Stat label="手续费" value={summary.fee.toFixed(2)} />
+          <Stat label="持仓浮动" value={moneyText(summary.unrealized)} pnl={summary.unrealized} />
+        </View>
+      ) : null}
+      {(board?.trades ?? []).length === 0 && !loading ? (
+        <Text style={styles.empty}>这一天没有开仓、平仓或持仓。</Text>
+      ) : null}
+      {(board?.trades ?? []).map((item) => (
+        <View key={item.id} style={styles.alert}>
+          <Text style={styles.alertTitle}>
+            {item.name} · {item.duration} · {item.side_text} · {item.mark}
+          </Text>
+          <Text style={styles.alertCode}>{item.symbol}</Text>
+          <Text style={styles.alertTime}>
+            开仓 {item.open_time}　{item.open_price} × {item.lots} 手
+          </Text>
+          <Text style={styles.alertTime}>
+            平仓 {item.close_time || "—"}　{item.close_reason || ""}
+          </Text>
+          <Text style={styles.alertReason}>
+            手续费 {Number(item.fee_open || 0).toFixed(2)}　净盈亏 {moneyText(item.net_pnl)}
+          </Text>
+        </View>
+      ))}
+    </ScrollView>
+  );
+}
+
+function Stat({ label, value, pnl }: { label: string; value: string; pnl?: number | null }) {
+  const color = pnl === null || pnl === undefined || pnl === 0 ? "#F4F0E8" : pnl > 0 ? "#FF6B6B" : "#3DDC97";
+  return (
+    <View style={styles.stat}>
+      <Text style={styles.meta}>{label}</Text>
+      <Text style={[styles.statValue, { color }]}>{value}</Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#0B1F33" },
   header: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 8 },
@@ -350,6 +512,17 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   sub: { color: "#9BB0C1", marginTop: 4, fontSize: 14 },
+  tabs: { flexDirection: "row", gap: 8, marginTop: 12 },
+  tab: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: "#143049" },
+  tabOn: { backgroundColor: "#C45C26" },
+  tabText: { color: "#F4F0E8", fontWeight: "700" },
+  dayRow: { gap: 8, paddingBottom: 12 },
+  dayChip: { backgroundColor: "#143049", borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
+  dayChipOn: { backgroundColor: "#C45C26" },
+  dayText: { color: "#F4F0E8", fontSize: 13 },
+  statGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12 },
+  stat: { width: "48%", backgroundColor: "#143049", borderRadius: 12, padding: 12 },
+  statValue: { marginTop: 6, fontSize: 18, fontWeight: "700" },
   card: {
     marginHorizontal: 16,
     marginBottom: 8,

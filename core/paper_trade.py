@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,10 @@ from pymysql.cursors import DictCursor
 from config.settings import PROJECT_ROOT
 from core.kline_store import DURATION_LABELS
 from utils.symbols import get_display_name
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+# 这几个周期在库里按 UTC 裸时间存放，日切时要加 8 小时
+UTC_DURATIONS = {1800, 3600, 7200, 10800, 14400}
 
 INITIAL_CASH = 50_000.0
 MARGIN_ADD = 0.01
@@ -614,6 +619,179 @@ def account_snapshot(conn: Connection, limit: int = 100) -> dict[str, Any]:
         "positions": positions,
         "trades": trades,
     }
+
+
+def beijing_clock(when: datetime, duration_sec: int) -> datetime:
+    """把库存时间换成北京时间。1 小时、30 分钟等按 UTC 存，其余已经是北京时间。"""
+    base = when.replace(tzinfo=None, microsecond=0) if when.tzinfo else when.replace(microsecond=0)
+    if int(duration_sec) in UTC_DURATIONS:
+        return base + timedelta(hours=8)
+    return base
+
+
+def session_day(when: datetime) -> date:
+    """商品交易日。21:00 及之后的夜盘算下一个交易日，周五夜盘算下周一。"""
+    minutes = when.hour * 60 + when.minute
+    if minutes >= 21 * 60:
+        nxt = when.date() + timedelta(days=1)
+        while nxt.weekday() >= 5:
+            nxt += timedelta(days=1)
+        return nxt
+    if minutes < 8 * 60 and when.weekday() == 5:
+        return when.date() + timedelta(days=2)
+    return when.date()
+
+
+def format_bj(when: datetime) -> str:
+    return when.strftime("%m-%d %H:%M")
+
+
+def trading_board(conn: Connection, day: date | None = None) -> dict[str, Any]:
+    """某一天的模拟交易汇总。day 为空时用北京时间的今天。"""
+    snap = account_snapshot(conn)
+    now = datetime.now(SHANGHAI).replace(tzinfo=None)
+    today = session_day(now)
+    selected = day or today
+    cur = conn.cursor(DictCursor)
+    try:
+        cur.execute(
+            """
+            SELECT id, symbol, name, duration_sec, duration, side, kind, status,
+                   open_time, open_price, lots, fee_open, fee_close,
+                   close_time, close_price, close_reason,
+                   gross_pnl, net_pnl, equity_after_open, equity_after_close,
+                   tp_price, sl_price, margin
+            FROM paper_trade
+            ORDER BY id
+            """
+        )
+        rows = [_row(item) for item in cur.fetchall()]
+    finally:
+        cur.close()
+    return _assemble_board(rows, snap, selected, today)
+
+
+def _assemble_board(
+    rows: list[dict[str, Any]],
+    snap: dict[str, Any],
+    selected: date,
+    today: date,
+) -> dict[str, Any]:
+    days: set[date] = {today}
+    prepared: list[dict[str, Any]] = []
+    for row in rows:
+        open_bj = beijing_clock(_parse_dt(row["open_time"]), int(row["duration_sec"]))
+        close_raw = row.get("close_time")
+        close_bj = beijing_clock(_parse_dt(close_raw), int(row["duration_sec"])) if close_raw else None
+        days.add(session_day(open_bj))
+        if close_bj is not None:
+            days.add(session_day(close_bj))
+        prepared.append({**row, "_open_bj": open_bj, "_close_bj": close_bj})
+
+    opened = closed = wins = losses = 0
+    net_pnl = gross_pnl = fee = 0.0
+    equity_events: list[tuple[datetime, float]] = []
+    trades: list[tuple[datetime, dict[str, Any]]] = []
+    for row in prepared:
+        open_bj = row["_open_bj"]
+        close_bj = row["_close_bj"]
+        did_open = session_day(open_bj) == selected
+        did_close = close_bj is not None and session_day(close_bj) == selected
+        held_today = selected == today and row.get("status") == "open"
+        if did_open:
+            opened += 1
+            fee += float(row.get("fee_open") or 0)
+            if row.get("equity_after_open") is not None:
+                equity_events.append((open_bj, float(row["equity_after_open"])))
+        if did_close:
+            closed += 1
+            fee += float(row.get("fee_close") or 0)
+            net_value = float(row.get("net_pnl") or 0)
+            gross_value = float(row.get("gross_pnl") or 0)
+            net_pnl += net_value
+            gross_pnl += gross_value
+            if net_value > 0:
+                wins += 1
+            elif net_value < 0:
+                losses += 1
+            if row.get("equity_after_close") is not None:
+                equity_events.append((close_bj, float(row["equity_after_close"])))
+        if not (did_open or did_close or held_today):
+            continue
+        if did_open and did_close:
+            mark = "开平"
+        elif did_open:
+            mark = "开仓"
+        elif did_close:
+            mark = "平仓"
+        else:
+            mark = "持仓"
+        trades.append((open_bj, _board_trade(row, open_bj, close_bj, mark)))
+
+    trades.sort(key=lambda item: item[0], reverse=True)
+    ordered = [item[1] for item in trades]
+    equity_events.sort(key=lambda item: item[0])
+    if selected == today:
+        equity = snap.get("equity")
+        unrealized = snap.get("unrealized")
+        open_positions = snap.get("open_count")
+    else:
+        equity = equity_events[-1][1] if equity_events else None
+        unrealized = None
+        open_positions = None
+    day_list = [item.isoformat() for item in sorted(days, reverse=True)]
+    return {
+        "today": today.isoformat(),
+        "date": selected.isoformat(),
+        "days": day_list,
+        "summary": {
+            "opened": opened,
+            "closed": closed,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": None if closed == 0 else round(wins / closed, 4),
+            "net_pnl": money(net_pnl),
+            "gross_pnl": money(gross_pnl),
+            "fee": money(fee),
+            "equity": None if equity is None else money(float(equity)),
+            "unrealized": None if unrealized is None else money(float(unrealized)),
+            "open_positions": open_positions,
+            "is_today": selected == today,
+        },
+        "trades": ordered,
+    }
+
+
+def _board_trade(row: dict[str, Any], open_bj: datetime, close_bj: datetime | None, mark: str) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row.get("name") or "",
+        "symbol": row.get("symbol") or "",
+        "duration": row.get("duration") or "",
+        "side": row.get("side") or "",
+        "side_text": "空" if row.get("side") == "short" else "多",
+        "kind": row.get("kind") or "",
+        "status": row.get("status") or "",
+        "mark": mark,
+        "open_time": format_bj(open_bj),
+        "close_time": None if close_bj is None else format_bj(close_bj),
+        "open_price": row.get("open_price"),
+        "close_price": row.get("close_price"),
+        "lots": row.get("lots"),
+        "fee_open": row.get("fee_open"),
+        "fee_close": row.get("fee_close"),
+        "net_pnl": row.get("net_pnl"),
+        "close_reason": row.get("close_reason"),
+        "tp_price": row.get("tp_price"),
+        "sl_price": row.get("sl_price"),
+    }
+
+
+def _parse_dt(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    text = str(value).replace("T", " ")
+    return datetime.fromisoformat(text)
 
 
 def _row(item: dict[str, Any]) -> dict[str, Any]:

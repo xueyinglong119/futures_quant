@@ -20,7 +20,7 @@ from core.indicators import (
     latest_indicator_snapshot,
 )
 from core.kline_store import LABEL_TO_DURATION, connect, ensure_table, load_bars
-from core.paper_trade import account_snapshot
+from core.paper_trade import account_snapshot, trading_board
 from core.market_data import DEFAULT_KLINE_SECONDS, get_today_klines
 from core.push_notify import send_alert_push
 
@@ -203,12 +203,38 @@ def json_safe_records(df) -> list[dict[str, Any]]:
     return rows
 
 
+@app.get("/board")
+def board_page() -> FileResponse:
+    page = WEB_DIR / "paper.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="看板不存在")
+    return FileResponse(page)
+
+
 @app.get("/api/paper")
 def api_paper(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
     """模拟账户：本金、持仓、每笔开仓手续费和盈亏。"""
     conn = connect()
     try:
         return account_snapshot(conn, limit=limit)
+    finally:
+        conn.close()
+
+
+@app.get("/api/paper/board")
+def api_paper_board(
+    day: str | None = Query(None, alias="date", description="北京时间日期 YYYY-MM-DD，默认今天"),
+) -> dict[str, Any]:
+    """按北京时间的某一天汇总模拟交易，并给出可切换的日期。"""
+    selected: date | None = None
+    if day:
+        try:
+            selected = date.fromisoformat(day.strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD") from exc
+    conn = connect()
+    try:
+        return trading_board(conn, selected)
     finally:
         conn.close()
 

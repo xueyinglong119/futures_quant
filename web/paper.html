@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>模拟交易看板</title>
+  <style>
+    :root {
+      --bg: #0b1f33;
+      --card: #143049;
+      --ink: #f4f0e8;
+      --muted: #9bb0c1;
+      --line: #2a4a66;
+      --accent: #c45c26;
+      --gold: #e8b86d;
+      --up: #ff6b6b;
+      --down: #3ddc97;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    .wrap { max-width: 880px; margin: 0 auto; padding: 20px 16px 48px; }
+    h1 { margin: 0; font-size: 26px; letter-spacing: 1px; }
+    .sub { color: var(--muted); margin: 6px 0 16px; font-size: 13px; }
+    .days {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 8px;
+      margin-bottom: 14px;
+    }
+    .days button {
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 8px 14px;
+      white-space: nowrap;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .days button.active { background: var(--accent); border-color: var(--accent); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    @media (min-width: 720px) {
+      .grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    }
+    .stat {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+    .stat span { display: block; color: var(--muted); font-size: 12px; }
+    .stat strong { display: block; margin-top: 6px; font-size: 20px; }
+    .up { color: var(--up); }
+    .down { color: var(--down); }
+    .flat { color: var(--ink); }
+    .list { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+    .trade {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 14px;
+      border-left: 3px solid var(--line);
+    }
+    .trade.head { border-left-color: var(--gold); }
+    .title { font-weight: 700; }
+    .meta, .line { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .line b { color: var(--ink); font-weight: 600; }
+    .empty, .error { color: var(--muted); text-align: center; margin-top: 28px; }
+    .error { color: #ff8f8f; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>模拟交易</h1>
+    <p class="sub">按交易日切换。21:00 之后的夜盘算到下一个交易日，钟点是北京时间。</p>
+    <div id="days" class="days"></div>
+    <div id="summary" class="grid"></div>
+    <div id="trades" class="list"></div>
+  </div>
+  <script>
+    const daysEl = document.getElementById("days");
+    const summaryEl = document.getElementById("summary");
+    const tradesEl = document.getElementById("trades");
+
+    function money(value) {
+      if (value === null || value === undefined || value === "") return "—";
+      const n = Number(value);
+      const text = (n > 0 ? "+" : "") + n.toFixed(2);
+      return text;
+    }
+
+    function tone(value) {
+      const n = Number(value);
+      if (!n) return "flat";
+      return n > 0 ? "up" : "down";
+    }
+
+    function stat(label, value, className) {
+      return `<div class="stat"><span>${label}</span><strong class="${className || ""}">${value}</strong></div>`;
+    }
+
+    function render(data) {
+      const summary = data.summary || {};
+      daysEl.innerHTML = (data.days || []).map((day) => {
+        const label = day === data.today ? `今天 ${day.slice(5)}` : day;
+        const active = day === data.date ? "active" : "";
+        return `<button class="${active}" data-day="${day}">${label}</button>`;
+      }).join("");
+      const rate = summary.win_rate === null || summary.win_rate === undefined
+        ? "—"
+        : `${Math.round(summary.win_rate * 100)}%`;
+      const equityLabel = summary.is_today ? "当前本金" : "当日最后本金";
+      summaryEl.innerHTML = [
+        stat("平仓净盈亏", money(summary.net_pnl), tone(summary.net_pnl)),
+        stat(equityLabel, summary.equity === null || summary.equity === undefined ? "—" : Number(summary.equity).toFixed(2)),
+        stat("开仓 / 平仓", `${summary.opened} / ${summary.closed}`),
+        stat("胜 / 负", `${summary.wins} / ${summary.losses}`),
+        stat("胜率", rate),
+        stat("手续费", Number(summary.fee || 0).toFixed(2)),
+        stat("持仓浮动", summary.unrealized === null || summary.unrealized === undefined ? "—" : money(summary.unrealized), tone(summary.unrealized)),
+        stat("持仓笔数", summary.open_positions === null || summary.open_positions === undefined ? "—" : String(summary.open_positions)),
+      ].join("");
+
+      const trades = data.trades || [];
+      if (!trades.length) {
+        tradesEl.innerHTML = `<div class="empty">这一天没有开仓、平仓或持仓。</div>`;
+        return;
+      }
+      tradesEl.innerHTML = trades.map((item) => {
+        const pnl = item.net_pnl === null || item.net_pnl === undefined ? "持仓中" : money(item.net_pnl);
+        const pnlClass = item.net_pnl === null || item.net_pnl === undefined ? "flat" : tone(item.net_pnl);
+        return `<article class="trade">
+          <div class="title">${item.name} · ${item.duration} · ${item.side_text} · ${item.mark}</div>
+          <div class="meta">${item.symbol}</div>
+          <div class="line">开仓 <b>${item.open_time}</b>　${item.open_price} × ${item.lots} 手　手续费 ${Number(item.fee_open || 0).toFixed(2)}</div>
+          <div class="line">平仓 <b>${item.close_time || "—"}</b>　${item.close_price ?? "—"}　${item.close_reason || ""}</div>
+          <div class="line">止盈 ${item.tp_price}　止损 ${item.sl_price}　净盈亏 <b class="${pnlClass}">${pnl}</b></div>
+        </article>`;
+      }).join("");
+    }
+
+    async function load(day) {
+      const query = day ? `?date=${encodeURIComponent(day)}` : "";
+      tradesEl.innerHTML = `<div class="empty">加载中…</div>`;
+      try {
+        const resp = await fetch(`/api/paper/board${query}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        render(await resp.json());
+      } catch (err) {
+        summaryEl.innerHTML = "";
+        tradesEl.innerHTML = `<div class="error">看板加载失败：${err.message}</div>`;
+      }
+    }
+
+    daysEl.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-day]");
+      if (!button) return;
+      load(button.dataset.day);
+    });
+
+    load("");
+  </script>
+</body>
+</html>
