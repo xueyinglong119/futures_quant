@@ -51,10 +51,10 @@ class HsTfConfig:
 TF_CONFIGS: dict[int, HsTfConfig] = {
     DURATION_1M: HsTfConfig(DURATION_1M, 8, 25, 240, 500),
     DURATION_5M: HsTfConfig(DURATION_5M, 6, 20, 120, 400),
-    DURATION_30M: HsTfConfig(DURATION_30M, 4, 10, 60, 300),
-    DURATION_1H: HsTfConfig(DURATION_1H, 3, 8, 48, 250),
-    DURATION_2H: HsTfConfig(DURATION_2H, 3, 6, 36, 200),
-    DURATION_1D: HsTfConfig(DURATION_1D, 2, 5, 40, 200),
+    DURATION_30M: HsTfConfig(DURATION_30M, 4, 10, 120, 300),
+    DURATION_1H: HsTfConfig(DURATION_1H, 3, 8, 80, 250),
+    DURATION_2H: HsTfConfig(DURATION_2H, 3, 6, 50, 200),
+    DURATION_1D: HsTfConfig(DURATION_1D, 2, 8, 100, 220),
 }
 
 
