@@ -128,7 +128,7 @@ def _windows_toast(title: str, message: str) -> None:
         pass
 
 
-def notify(kind: str, when: datetime, reason: str, alert_path: Path) -> None:
+def notify(kind: str, when: datetime, reason: str, alert_path: Path, detail: dict | None = None) -> None:
     title = f"乙二醇2701 {kind}"
     body = f"{when.strftime('%m-%d %H:%M')} {reason}"
     line = f"{ALERT_TAG} {title} | {body}"
@@ -141,11 +141,15 @@ def notify(kind: str, when: datetime, reason: str, alert_path: Path) -> None:
         )
     _windows_toast(title, body)
     try:
+        extra = {}
+        if detail:
+            extra["detail"] = detail
         alert = add_alert(
             symbol=MONITOR_SYMBOL,
             kind=kind,
             reason=reason,
             bar_time=when.isoformat(timespec="seconds"),
+            extra=extra,
         )
         push_result = send_alert_push(alert)
         print(f"App推送结果: {push_result}", flush=True)
@@ -185,7 +189,7 @@ def _scan_all(
         if key in seen:
             continue
         seen.add(key)
-        notify(kind, when, signal.reason, alert_path)
+        notify(kind, when, signal.reason, alert_path, detail=getattr(signal, "detail", None))
 
 
 def main() -> None:

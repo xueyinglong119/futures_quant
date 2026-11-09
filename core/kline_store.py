@@ -49,7 +49,7 @@ DURATION_LABELS = {
 
 LABEL_TO_DURATION = {v: k for k, v in DURATION_LABELS.items()}
 
-# 专业版可直接下载的周期（不含季/年）
+# 专业版可直接下载的周期（不含月/季/年，后三者由日线聚合）
 DOWNLOADABLE_DURATIONS = [
     DURATION_1M,
     DURATION_3M,
@@ -65,7 +65,11 @@ DOWNLOADABLE_DURATIONS = [
     DURATION_1W,
 ]
 
-# 当前流水线已在跑 1m/5m，补跑这些缺口
+# 实时/同步入库应对齐行情软件「更多周期」：上表全部 + 月/季/年
+INGEST_DURATIONS = list(DOWNLOADABLE_DURATIONS)
+AGGREGATE_FROM_DAILY = [DURATION_1MON, DURATION_1Q, DURATION_1Y]
+
+# 历史补洞：相对早期只跑 1m/5m 时缺的可下载周期
 DOWNLOAD_GAP_DURATIONS = [
     DURATION_3M,
     DURATION_10M,

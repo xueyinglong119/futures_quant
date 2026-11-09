@@ -144,6 +144,7 @@ def emit_alert(
     kind: str,
     when: datetime,
     reason: str,
+    detail: dict[str, Any] | None = None,
     alert_log: Path | None = None,
     push: bool = True,
     toast: bool = True,
@@ -166,6 +167,15 @@ def emit_alert(
     if toast:
         windows_toast(title, body)
 
+    extra: dict[str, Any] = {
+        "duration": label,
+        "duration_sec": duration_sec,
+        "name": name,
+        "display": f"{name}({symbol})",
+    }
+    if detail:
+        extra["detail"] = detail
+
     alert_id: str | None = None
     try:
         alert = add_alert(
@@ -173,12 +183,7 @@ def emit_alert(
             kind=kind,
             reason=f"[{name} · {label}] {reason}",
             bar_time=when.isoformat(timespec="seconds"),
-            extra={
-                "duration": label,
-                "duration_sec": duration_sec,
-                "name": name,
-                "display": f"{name}({symbol})",
-            },
+            extra=extra,
         )
         alert_id = alert.id
         if push:
@@ -278,6 +283,7 @@ class HsMonitorEngine:
             kind=kind,
             when=last_dt,
             reason=signal.reason,
+            detail=getattr(signal, "detail", None),
             alert_log=alert_log,
             push=push,
             toast=toast,

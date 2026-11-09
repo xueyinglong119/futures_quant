@@ -1,6 +1,9 @@
 """开盘实时链路：订阅 K 线 → 收盘写入 MySQL → 头肩检测告警。
 
-只把已经走完的 K 线入库并参与检测。正在走的那根只留在行情里，收盘后下一拍写入。
+入库周期对齐行情软件「更多周期」：1/3/5/10/15/30分、1/2/3/4小时、日/周；
+月/季/年在日线收盘后由日线聚合写入。头肩仍只跑 HS_MONITOR_DURATIONS。
+
+只把已经走完的 K 线入库。正在走的那根只留在行情里，收盘后下一拍写入。
 时间戳沿用该品种该周期库里已有的钟（UTC 或北京时间），避免同一根 K 线写两遍。
 """
 
@@ -25,10 +28,20 @@ from core.hs_monitor import (
     bars_to_strategy_df,
     load_tf_df,
 )
-from core.kline_fetch import wait_klines_ready
+from core.kline_fetch import (
+    aggregate_monthly_from_daily,
+    aggregate_quarterly_from_daily,
+    aggregate_yearly_from_daily,
+    wait_klines_ready,
+)
 from core.paper_trade import PaperBroker
 from core.kline_store import (
+    DURATION_1D,
+    DURATION_1MON,
+    DURATION_1Q,
+    DURATION_1Y,
     DURATION_LABELS,
+    INGEST_DURATIONS,
     connect,
     ensure_table,
     load_bars,
@@ -37,14 +50,20 @@ from core.kline_store import (
 
 TZ = ZoneInfo("Asia/Shanghai")
 
-# 覆盖周五收盘到周一上午的缺口，同时给检测留够回看
+# 覆盖周五收盘到周一上午的缺口；各入库周期订阅长度
 TAIL_LENGTH: dict[int, int] = {
-    60: 2000,
-    300: 600,
-    1800: 300,
-    3600: 200,
-    7200: 120,
-    86400: 40,
+    60: 2000,       # 1m
+    180: 1200,      # 3m
+    300: 800,       # 5m
+    600: 600,       # 10m
+    900: 500,       # 15m
+    1800: 400,      # 30m
+    3600: 300,      # 1h
+    7200: 200,      # 2h
+    10800: 160,     # 3h
+    14400: 140,     # 4h
+    86400: 80,      # 1d
+    604800: 60,     # 1w
 }
 
 
@@ -96,6 +115,22 @@ def _ohlc_equal(a: dict, b: dict) -> bool:
     return True
 
 
+def _bar_payload_equal(a: dict, b: dict) -> bool:
+    """判断两根 K 是否同一最终态（含量/仓，用于避免半截数据锁死）。"""
+    if not _ohlc_equal(a, b):
+        return False
+    if int(a.get("volume") or 0) != int(b.get("volume") or 0):
+        return False
+    if int(a.get("open_oi") or 0) != int(b.get("open_oi") or 0):
+        return False
+    return True
+
+
+def _bar_closed(start_utc: datetime, duration_sec: int, now_utc: datetime) -> bool:
+    """按墙钟判断该根是否已走完；未完成的只留在行情序列里，不入库。"""
+    return start_utc + timedelta(seconds=duration_sec + 3) <= now_utc
+
+
 def _in_beijing_session(dt: datetime) -> bool:
     """这个钟点落在商品期货日盘或夜盘里（含 02:30 前的夜盘延续）。"""
     hm = dt.hour * 60 + dt.minute
@@ -140,7 +175,11 @@ def _valid_ns(ns) -> bool:
 
 
 def serial_to_rows(klines: pd.DataFrame, duration_sec: int, now_utc: datetime) -> list[dict]:
-    """解析序列。最后一根若还没收盘，不放进结果。"""
+    """解析序列，只返回已收盘 K；正在走的最后一根不入库。
+
+    - 已被下一根顶替的（[:-1]）视为收盘。
+    - 序列最后一根仅当墙钟已过结束时刻 + 3 秒才入库（小节/收盘后收尾）。
+    """
     if klines is None or len(klines) == 0:
         return []
     parsed: list[dict] = []
@@ -172,10 +211,9 @@ def serial_to_rows(klines: pd.DataFrame, duration_sec: int, now_utc: datetime) -
         )
     if not parsed:
         return []
-    closed = parsed[:-1]
+    closed = list(parsed[:-1])
     last = parsed[-1]
-    # 收盘后若不再长出新 K 线（小节结束），晚 3 秒把最后一根也收进来
-    if last["utc"] + timedelta(seconds=duration_sec + 3) <= now_utc:
+    if _bar_closed(last["utc"], duration_sec, now_utc):
         closed.append(last)
     return closed
 
@@ -185,6 +223,7 @@ class _SeriesState:
     clock: str | None = None
     watermark: datetime | None = None
     frame: pd.DataFrame = field(default_factory=pd.DataFrame)
+    last_payload: dict | None = None
 
 
 class RealtimePipeline:
@@ -212,19 +251,28 @@ class RealtimePipeline:
             self.engine.on_signal = None
         try:
             symbols = list_commodity_mains(api)
-            print(f"[pipeline] 品种 {len(symbols)}", flush=True)
+            ingest_labels = [DURATION_LABELS[d] for d in INGEST_DURATIONS]
+            print(
+                f"[pipeline] 品种 {len(symbols)}，入库周期 {','.join(ingest_labels)} "
+                f"（月/季/年由日线聚合）",
+                flush=True,
+            )
             serials: dict[tuple[str, int], pd.DataFrame] = {}
             for symbol in symbols:
-                for dur in HS_MONITOR_DURATIONS:
+                for dur in INGEST_DURATIONS:
                     length = TAIL_LENGTH.get(dur, 200)
                     try:
                         serials[(symbol, dur)] = api.get_kline_serial(
                             symbol, dur, data_length=length
                         )
                     except Exception as exc:  # noqa: BLE001
-                        print(f"[pipeline] 订阅失败 {symbol} {dur}: {exc}", flush=True)
+                        print(
+                            f"[pipeline] 订阅失败 {symbol} "
+                            f"{DURATION_LABELS.get(dur, dur)}: {exc}",
+                            flush=True,
+                        )
             print(f"[pipeline] 已订阅 {len(serials)} 条序列，等待行情...", flush=True)
-            wait_klines_ready(api, list(serials.values()), timeout_sec=180)
+            wait_klines_ready(api, list(serials.values()), timeout_sec=300)
             self._catch_up(conn, serials)
             while in_trading_window(datetime.now(TZ)):
                 api.wait_update(deadline=time_monotonic_deadline(api, 5))
@@ -268,9 +316,16 @@ class RealtimePipeline:
         fresh: list[dict] = []
         for row in closed:
             stored = row["utc"] if clock == "utc" else row["beijing"]
-            if state.watermark is not None and stored <= state.watermark:
+            if state.watermark is not None and stored < state.watermark:
                 continue
-            fresh.append({**row, "stored": stored})
+            # 同时间戳：仅当 OHLC/量发生变化时覆盖（修正半截入库），否则跳过
+            if state.watermark is not None and stored == state.watermark:
+                last = state.last_payload or _frame_last_bar(state.frame)
+                if last is not None and _bar_payload_equal(last, row):
+                    continue
+                fresh.append({**row, "stored": stored, "correction": True})
+                continue
+            fresh.append({**row, "stored": stored, "correction": False})
         if not fresh:
             return 0, 0
         fresh.sort(key=lambda r: r["stored"])
@@ -292,10 +347,30 @@ class RealtimePipeline:
             ],
         )
         alerts = 0
-        lookback = TF_CONFIGS[duration_sec].lookback_bars
+        do_hs = duration_sec in HS_MONITOR_DURATIONS
+        lookback = (
+            TF_CONFIGS[duration_sec].lookback_bars
+            if do_hs
+            else TAIL_LENGTH.get(duration_sec, 200)
+        )
         for row in fresh:
-            state.frame = _append_frame(state.frame, row["stored"], row, lookback)
+            correction = bool(row.get("correction"))
+            if do_hs:
+                state.frame = _upsert_frame(state.frame, row["stored"], row, lookback)
             state.watermark = row["stored"]
+            state.last_payload = {
+                "open": row["open"],
+                "high": row["high"],
+                "low": row["low"],
+                "close": row["close"],
+                "volume": row["volume"],
+                "open_oi": row["open_oi"],
+            }
+            # 修正半截 K：只更新库（和检测窗口），不重复模拟成交/告警
+            if correction:
+                continue
+            if not do_hs:
+                continue
             if self.broker is not None:
                 try:
                     self.broker.on_bar(symbol, duration_sec, row["stored"], row)
@@ -310,6 +385,8 @@ class RealtimePipeline:
                 toast=False,
                 emit=True,
             )
+        if any(not r.get("correction") for r in fresh) and duration_sec == DURATION_1D:
+            _refresh_htf_from_daily(conn, symbol)
         label = DURATION_LABELS.get(duration_sec, str(duration_sec))
         if alerts:
             print(
@@ -327,17 +404,65 @@ class RealtimePipeline:
     ) -> _SeriesState:
         recent = load_bars(conn, symbol, duration_sec, limit=40)
         clock = detect_clock(recent, closed)
-        frame = load_tf_df(symbol, duration_sec, conn=conn)
+        frame = pd.DataFrame()
         watermark = None
-        if frame is not None and not frame.empty:
-            watermark = _as_naive(pd.Timestamp(frame.iloc[-1]["datetime"]).to_pydatetime())
-            self.engine._last_bar_dt[self.engine._key(symbol, duration_sec)] = watermark
-        elif recent:
+        last_payload = None
+        if duration_sec in HS_MONITOR_DURATIONS:
+            frame = load_tf_df(symbol, duration_sec, conn=conn)
+            if frame is not None and not frame.empty:
+                watermark = _as_naive(
+                    pd.Timestamp(frame.iloc[-1]["datetime"]).to_pydatetime()
+                )
+                self.engine._last_bar_dt[
+                    self.engine._key(symbol, duration_sec)
+                ] = watermark
+                last_payload = _frame_last_bar(frame)
+        if watermark is None and recent:
             watermark = _as_naive(recent[-1]["datetime_end"])
-        return _SeriesState(clock=clock, watermark=watermark, frame=frame)
+            last_payload = {
+                "open": recent[-1]["open"],
+                "high": recent[-1]["high"],
+                "low": recent[-1]["low"],
+                "close": recent[-1]["close"],
+                "volume": recent[-1]["volume"],
+                "open_oi": recent[-1]["open_oi"],
+            }
+        return _SeriesState(
+            clock=clock,
+            watermark=watermark,
+            frame=frame,
+            last_payload=last_payload,
+        )
 
 
-def _append_frame(frame: pd.DataFrame, stored: datetime, row: dict, lookback: int) -> pd.DataFrame:
+def _refresh_htf_from_daily(conn, symbol: str) -> None:
+    """日线有新收盘后，重算月/季/年并入库。"""
+    daily = load_bars(conn, symbol, DURATION_1D)
+    if not daily:
+        return
+    upsert_bars(conn, symbol, DURATION_1MON, aggregate_monthly_from_daily(daily))
+    upsert_bars(conn, symbol, DURATION_1Q, aggregate_quarterly_from_daily(daily))
+    upsert_bars(conn, symbol, DURATION_1Y, aggregate_yearly_from_daily(daily))
+
+
+def _frame_last_bar(frame: pd.DataFrame) -> dict | None:
+    if frame is None or frame.empty:
+        return None
+    last = frame.iloc[-1]
+    return {
+        "open": float(last["open"]),
+        "high": float(last["high"]),
+        "low": float(last["low"]),
+        "close": float(last["close"]),
+        "volume": int(last.get("volume") or 0),
+        "open_oi": int(last.get("open_oi") or 0),
+    }
+
+
+def _upsert_frame(
+    frame: pd.DataFrame, stored: datetime, row: dict, lookback: int
+) -> pd.DataFrame:
+    """追加新 K，或覆盖同时间戳末根（最终态修正）。"""
     extra = bars_to_strategy_df(
         [
             {
@@ -354,7 +479,11 @@ def _append_frame(frame: pd.DataFrame, stored: datetime, row: dict, lookback: in
     if frame is None or frame.empty:
         merged = extra
     else:
-        merged = pd.concat([frame, extra], ignore_index=True)
+        last_dt = _as_naive(pd.Timestamp(frame.iloc[-1]["datetime"]).to_pydatetime())
+        if last_dt == _as_naive(stored):
+            merged = pd.concat([frame.iloc[:-1], extra], ignore_index=True)
+        else:
+            merged = pd.concat([frame, extra], ignore_index=True)
     if len(merged) > lookback:
         merged = merged.iloc[-lookback:].reset_index(drop=True)
     return merged

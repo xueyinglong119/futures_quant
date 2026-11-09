@@ -3,10 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 import pandas as pd
 
 from strategies.base import Signal
+
+
+def _format_bar_time(dt_val) -> str:
+    """将 K 线时间值（datetime / Timestamp / 纳秒整数）格式化为 MM-DD HH:MM。"""
+    if isinstance(dt_val, (int, float)) and not isinstance(dt_val, bool):
+        try:
+            return pd.Timestamp(int(dt_val), unit="ns").strftime("%m-%d %H:%M")
+        except (ValueError, OverflowError):
+            return str(dt_val)
+    if isinstance(dt_val, pd.Timestamp):
+        return dt_val.strftime("%m-%d %H:%M")
+    if isinstance(dt_val, datetime):
+        return dt_val.strftime("%m-%d %H:%M")
+    return str(dt_val)
 
 
 @dataclass
@@ -261,18 +276,25 @@ class HeadShouldersStrategy:
         )
         if found is None:
             return None
-        idx_l, price_l, idx_h, price_h, idx_r, price_r, neck, pattern_id = found
+        idx_l, price_l, idx_h, price_h, idx_r, price_r, neck, pattern_id, neck_l_idx, neck_r_idx = found
         traded.add(pattern_id)
         traded.add(f"top-head:{idx_h}")
         self._register_short(symbol, price_h, neck)
         valley = self._swing_low(klines.low, idx_l, idx_h)
         swing = None if valley is None else price_h - valley
+
+        left_time = _format_bar_time(klines.iloc[idx_l]["datetime"])
+        head_time = _format_bar_time(klines.iloc[idx_h]["datetime"])
+        right_time = _format_bar_time(klines.iloc[idx_r]["datetime"])
+        neck_l_time = _format_bar_time(klines.iloc[neck_l_idx]["datetime"])
+        neck_r_time = _format_bar_time(klines.iloc[neck_r_idx]["datetime"])
+
         return Signal(
             target_volume=-volume,
             action="sell",
             reason=(
-                f"头肩顶破颈线 左{price_l:.0f} 头{price_h:.0f} "
-                f"右{price_r:.0f} 颈{neck:.0f}"
+                f"头肩顶破颈线 左{price_l:.0f}({left_time}) 头{price_h:.0f}({head_time}) "
+                f"右{price_r:.0f}({right_time}) 颈{neck:.0f}"
             ),
             detail={
                 "side": "short",
@@ -282,6 +304,14 @@ class HeadShouldersStrategy:
                 "neck": neck,
                 "extreme": valley,
                 "swing": swing,
+                "left_time": left_time,
+                "head_time": head_time,
+                "right_time": right_time,
+                "neck_l_time": neck_l_time,
+                "neck_r_time": neck_r_time,
+                "left_idx": idx_l,
+                "head_idx": idx_h,
+                "right_idx": idx_r,
             },
         )
 
@@ -299,18 +329,25 @@ class HeadShouldersStrategy:
         )
         if found is None:
             return None
-        idx_l, price_l, idx_h, price_h, idx_r, price_r, neck, pattern_id = found
+        idx_l, price_l, idx_h, price_h, idx_r, price_r, neck, pattern_id, neck_l_idx, neck_r_idx = found
         traded.add(pattern_id)
         traded.add(f"bottom-head:{idx_h}")
         self._register_long(symbol, price_h, neck)
         peak = self._swing_high(klines.high, idx_l, idx_h)
         swing = None if peak is None else peak - price_h
+
+        left_time = _format_bar_time(klines.iloc[idx_l]["datetime"])
+        head_time = _format_bar_time(klines.iloc[idx_h]["datetime"])
+        right_time = _format_bar_time(klines.iloc[idx_r]["datetime"])
+        neck_l_time = _format_bar_time(klines.iloc[neck_l_idx]["datetime"])
+        neck_r_time = _format_bar_time(klines.iloc[neck_r_idx]["datetime"])
+
         return Signal(
             target_volume=volume,
             action="buy",
             reason=(
-                f"头肩底破颈线 左{price_l:.0f} 头{price_h:.0f} "
-                f"右{price_r:.0f} 颈{neck:.0f}"
+                f"头肩底破颈线 左{price_l:.0f}({left_time}) 头{price_h:.0f}({head_time}) "
+                f"右{price_r:.0f}({right_time}) 颈{neck:.0f}"
             ),
             detail={
                 "side": "long",
@@ -320,6 +357,14 @@ class HeadShouldersStrategy:
                 "neck": neck,
                 "extreme": peak,
                 "swing": swing,
+                "left_time": left_time,
+                "head_time": head_time,
+                "right_time": right_time,
+                "neck_l_time": neck_l_time,
+                "neck_r_time": neck_r_time,
+                "left_idx": idx_l,
+                "head_idx": idx_h,
+                "right_idx": idx_r,
             },
         )
 
@@ -349,7 +394,7 @@ class HeadShouldersStrategy:
         *,
         bottom: bool,
         kind: str,
-    ) -> tuple[int, float, int, float, int, float, float, str] | None:
+    ) -> tuple[int, float, int, float, int, float, float, str, int, int] | None:
         """在本根收盘刚突破颈线的形态里，取头部最高的那一个。"""
         if len(pivots) < 3 or len(klines) < 2:
             return None
@@ -433,7 +478,7 @@ class HeadShouldersStrategy:
                     if best is None or height > best[0]:
                         best = (
                             height,
-                            (idx_l, price_l, idx_h, price_h, idx_r, price_r, neck_now, pattern_id),
+                            (idx_l, price_l, idx_h, price_h, idx_r, price_r, neck_now, pattern_id, n1, n2),
                         )
 
         if best is None:
