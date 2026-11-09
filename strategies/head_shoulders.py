@@ -22,7 +22,7 @@ class HeadShouldersStrategy:
     头肩顶 / 头肩底。
 
     头是区间里的极值。一边可以有两个肩，取其中能和另一边配成形态的那一对。
-    颈线连接头两侧的回撤极值，允许倾斜，倾斜不超过头部高度的一半。
+    颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的一半。
     两肩都要明显离开颈线，收盘突破颈线才开仓。突破后的回抽不再重复开仓。
     """
 
@@ -173,19 +173,6 @@ class HeadShouldersStrategy:
             return (p1 + p2) / 2
         return p1 + (p2 - p1) * ((idx - i1) / (i2 - i1))
 
-    def _segment_extreme(
-        self, series: pd.Series, i0: int, i1: int, *, lowest: bool
-    ) -> tuple[int, float] | None:
-        if i1 <= i0 + 1:
-            return None
-        seg = series.iloc[i0 + 1 : i1]
-        if seg.empty:
-            return None
-        values = seg.to_numpy()
-        rel = int(values.argmin() if lowest else values.argmax())
-        idx = i0 + 1 + rel
-        return idx, float(series.iloc[idx])
-
     def _shape_ok(
         self,
         price_l: float,
@@ -269,9 +256,8 @@ class HeadShouldersStrategy:
         traded: set[str],
         symbol: str,
     ) -> Signal | None:
-        del pivot_lows
         found = self._best_break(
-            pivot_highs, klines, traded, bottom=False, kind="top"
+            pivot_highs, pivot_lows, klines, traded, bottom=False, kind="top"
         )
         if found is None:
             return None
@@ -308,9 +294,8 @@ class HeadShouldersStrategy:
         traded: set[str],
         symbol: str,
     ) -> Signal | None:
-        del pivot_highs
         found = self._best_break(
-            pivot_lows, klines, traded, bottom=True, kind="bottom"
+            pivot_lows, pivot_highs, klines, traded, bottom=True, kind="bottom"
         )
         if found is None:
             return None
@@ -338,9 +323,27 @@ class HeadShouldersStrategy:
             },
         )
 
+    def _reaction_neck(
+        self,
+        reaction_pivots: list[tuple[int, float]],
+        i0: int,
+        i1: int,
+        *,
+        lowest: bool,
+    ) -> tuple[int, float] | None:
+        """肩和头之间的颈线拐点，必须离开两端至少一根拐点宽度。"""
+        gap = self.pivot_order
+        inside = [p for p in reaction_pivots if i0 + gap <= p[0] <= i1 - gap]
+        if not inside:
+            return None
+        if lowest:
+            return min(inside, key=lambda p: (p[1], p[0]))
+        return max(inside, key=lambda p: (p[1], -p[0]))
+
     def _best_break(
         self,
         pivots: list[tuple[int, float]],
+        reaction_pivots: list[tuple[int, float]],
         klines: pd.DataFrame,
         traded: set[str],
         *,
@@ -355,7 +358,6 @@ class HeadShouldersStrategy:
         prev_close = float(closes.iloc[-2])
         close = float(closes.iloc[-1])
         extreme = klines.low if bottom else klines.high
-        reaction = klines.high if bottom else klines.low
         best: tuple[float, tuple] | None = None
         break_limit = max(self.max_span_bars // 2, self.pivot_order * 3)
 
@@ -395,8 +397,12 @@ class HeadShouldersStrategy:
                         continue
                     if not bottom and float(window.max()) > price_h:
                         continue
-                    neck_l = self._segment_extreme(reaction, idx_l, idx_h, lowest=not bottom)
-                    neck_r = self._segment_extreme(reaction, idx_h, idx_r, lowest=not bottom)
+                    neck_l = self._reaction_neck(
+                        reaction_pivots, idx_l, idx_h, lowest=not bottom
+                    )
+                    neck_r = self._reaction_neck(
+                        reaction_pivots, idx_h, idx_r, lowest=not bottom
+                    )
                     if neck_l is None or neck_r is None:
                         continue
                     shaped = self._shape_ok(
