@@ -39,6 +39,21 @@ DAY_30MIN_BAR_DEFS: list[tuple[time, list[tuple[time, time]]]] = [
     (time(15, 0), [(time(14, 45), time(15, 0))]),
 ]
 
+# 1 小时 K 线（有效交易约 60 分钟凑一根；末根 14:15-15:00 为 45 分钟）
+DAY_1H_BAR_DEFS: list[tuple[time, list[tuple[time, time]]]] = [
+    (time(10, 0), [(time(9, 0), time(10, 0))]),
+    # 跨小节休市：10:00-10:15 + 10:30-11:15
+    (time(11, 15), [(time(10, 0), time(10, 15)), (time(10, 30), time(11, 15))]),
+    # 跨午休：11:15-11:30 + 13:30-14:15
+    (time(14, 15), [(time(11, 15), time(11, 30)), (time(13, 30), time(14, 15))]),
+    (time(15, 0), [(time(14, 15), time(15, 0))]),
+]
+
+NIGHT_1H_BAR_DEFS: list[tuple[time, list[tuple[time, time]]]] = [
+    (time(22, 0), [(time(21, 0), time(22, 0))]),
+    (time(23, 0), [(time(22, 0), time(23, 0))]),
+]
+
 
 @dataclass(frozen=True)
 class SessionBarDef:
@@ -60,13 +75,31 @@ def get_day_30min_bar_defs() -> list[SessionBarDef]:
     ]
 
 
-def get_day_30min_schedule_text() -> str:
+def get_day_1h_bar_defs() -> list[SessionBarDef]:
+    return [
+        SessionBarDef(label=label, segments=tuple(segs))
+        for label, segs in DAY_1H_BAR_DEFS
+    ]
+
+
+def get_night_1h_bar_defs() -> list[SessionBarDef]:
+    return [
+        SessionBarDef(label=label, segments=tuple(segs))
+        for label, segs in NIGHT_1H_BAR_DEFS
+    ]
+
+
+def _schedule_text(
+    title: str,
+    day_defs: list[SessionBarDef],
+    night_defs: list[SessionBarDef],
+) -> str:
     lines = [
-        "国内商品期货 30 分钟 K 线：datetime_start 为上一根结束时刻，datetime_end 为本根结束时刻",
+        title,
         "【日盘】",
     ]
     prev = time(9, 0)
-    for bar in get_day_30min_bar_defs():
+    for bar in day_defs:
         seg_text = " + ".join(
             f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in bar.segments
         )
@@ -77,7 +110,7 @@ def get_day_30min_schedule_text() -> str:
         prev = bar.label
     lines.append("【夜盘 21:00-23:00】")
     prev = time(15, 0)
-    for bar in get_night_30min_bar_defs():
+    for bar in night_defs:
         seg_text = " + ".join(
             f"{s.strftime('%H:%M')}-{e.strftime('%H:%M')}" for s, e in bar.segments
         )
@@ -87,6 +120,22 @@ def get_day_30min_schedule_text() -> str:
         )
         prev = bar.label
     return "\n".join(lines)
+
+
+def get_day_30min_schedule_text() -> str:
+    return _schedule_text(
+        "国内商品期货 30 分钟 K 线：datetime_start 为上一根结束时刻，datetime_end 为本根结束时刻",
+        get_day_30min_bar_defs(),
+        get_night_30min_bar_defs(),
+    )
+
+
+def get_day_1h_schedule_text() -> str:
+    return _schedule_text(
+        "国内商品期货 1 小时 K 线：按有效交易时长对齐，datetime_end 为盘面标注时刻",
+        get_day_1h_bar_defs(),
+        get_night_1h_bar_defs(),
+    )
 
 
 def _combine(dt: date, t: time) -> datetime:
@@ -119,17 +168,34 @@ def get_session_bar_trigger_minutes() -> frozenset[time]:
     )
 
 
-def aggregate_session_bars(
+def get_session_1h_trigger_minutes() -> frozenset[time]:
+    """1 分钟走到这些时刻时，可能刚完成一根新的 1 小时 bar。"""
+    return frozenset(
+        {
+            time(9, 59),
+            time(10, 14),
+            time(11, 14),
+            time(14, 14),
+            time(14, 59),
+            time(21, 59),
+            time(22, 59),
+        }
+    )
+
+
+def aggregate_session_tf_bars(
     minute_bars: list[dict],
     trade_date: date,
+    day_defs: list[SessionBarDef],
+    night_defs: list[SessionBarDef],
     *,
     time_label: str = "end",
     include_night: bool = True,
 ) -> list[dict]:
-    """
-    从 1 分钟 K 线按国内期货 30 分钟规则合成 K 线（日盘 8 根 + 夜盘 4 根）。
+    """从 1 分钟按给定小节规则合成 K 线。
 
     minute_bars 每项需含: datetime(datetime), open, high, low, close, volume, open_oi
+    其中 datetime 须为北京时间。
     """
     day_minutes = [
         b
@@ -150,7 +216,7 @@ def aggregate_session_bars(
 
     result: list[dict] = []
     prev_label = time(9, 0)
-    for bar_def in get_day_30min_bar_defs():
+    for bar_def in day_defs:
         matched = _select_minutes(day_minutes, bar_def.segments)
         if not matched:
             continue
@@ -160,8 +226,8 @@ def aggregate_session_bars(
         prev_label = bar_def.label
 
     if include_night and night_minutes:
-        prev_label = get_day_30min_bar_defs()[-1].label  # 15:00
-        for bar_def in get_night_30min_bar_defs():
+        prev_label = day_defs[-1].label if day_defs else time(15, 0)
+        for bar_def in night_defs:
             matched = _select_minutes(night_minutes, bar_def.segments)
             if not matched:
                 continue
@@ -171,6 +237,42 @@ def aggregate_session_bars(
             prev_label = bar_def.label
 
     return result
+
+
+def aggregate_session_bars(
+    minute_bars: list[dict],
+    trade_date: date,
+    *,
+    time_label: str = "end",
+    include_night: bool = True,
+) -> list[dict]:
+    """从 1 分钟按国内期货 30 分钟规则合成（日盘 8 根 + 夜盘 4 根）。"""
+    return aggregate_session_tf_bars(
+        minute_bars,
+        trade_date,
+        get_day_30min_bar_defs(),
+        get_night_30min_bar_defs(),
+        time_label=time_label,
+        include_night=include_night,
+    )
+
+
+def aggregate_session_1h_bars(
+    minute_bars: list[dict],
+    trade_date: date,
+    *,
+    time_label: str = "end",
+    include_night: bool = True,
+) -> list[dict]:
+    """从 1 分钟按国内期货 1 小时规则合成（日盘 4 根 + 夜盘 2 根）。"""
+    return aggregate_session_tf_bars(
+        minute_bars,
+        trade_date,
+        get_day_1h_bar_defs(),
+        get_night_1h_bar_defs(),
+        time_label=time_label,
+        include_night=include_night,
+    )
 
 
 def _build_session_bar(
