@@ -75,6 +75,18 @@
     .line b { color: var(--ink); font-weight: 600; }
     .empty, .error { color: var(--muted); text-align: center; margin-top: 28px; }
     .error { color: #ff8f8f; }
+    .actions { margin-top: 10px; }
+    .close-btn {
+      border: 0;
+      background: var(--accent);
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 8px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .close-btn:disabled { opacity: 0.5; cursor: default; }
   </style>
 </head>
 <body>
@@ -135,19 +147,61 @@
         return;
       }
       tradesEl.innerHTML = trades.map((item) => {
-        const pnl = item.net_pnl === null || item.net_pnl === undefined ? "持仓中" : money(item.net_pnl);
-        const pnlClass = item.net_pnl === null || item.net_pnl === undefined ? "flat" : tone(item.net_pnl);
-        return `<article class="trade">
+        const open = !!item.can_close;
+        const pnl = open
+          ? money(item.unrealized)
+          : (item.net_pnl === null || item.net_pnl === undefined ? "—" : money(item.net_pnl));
+        const pnlClass = open
+          ? tone(item.unrealized)
+          : (item.net_pnl === null || item.net_pnl === undefined ? "flat" : tone(item.net_pnl));
+        const pnlLabel = open ? "浮动盈亏" : "净盈亏";
+        const markLine = open && item.last_price != null
+          ? `<div class="line">现价 <b>${item.last_price}</b></div>`
+          : "";
+        const action = open
+          ? `<div class="actions"><button class="close-btn" data-close="${item.id}">平仓</button></div>`
+          : "";
+        return `<article class="trade ${open ? "head" : ""}">
           <div class="title">${item.name} · ${item.duration} · ${item.side_text} · ${item.mark}</div>
           <div class="meta">${item.symbol}</div>
           <div class="line">开仓 <b>${item.open_time}</b>　${item.open_price} × ${item.lots} 手　手续费 ${Number(item.fee_open || 0).toFixed(2)}</div>
           <div class="line">平仓 <b>${item.close_time || "—"}</b>　${item.close_price ?? "—"}　${item.close_reason || ""}</div>
-          <div class="line">止盈 ${item.tp_price}　止损 ${item.sl_price}　净盈亏 <b class="${pnlClass}">${pnl}</b></div>
+          ${markLine}
+          <div class="line">止盈 ${item.tp_price}　止损 ${item.sl_price}　${pnlLabel} <b class="${pnlClass}">${pnl}</b></div>
+          ${action}
         </article>`;
       }).join("");
     }
 
+    let currentDay = "";
+
+    daysEl.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-day]");
+      if (!button) return;
+      load(button.dataset.day);
+    });
+
+    tradesEl.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-close]");
+      if (!button) return;
+      const tradeId = button.dataset.close;
+      if (!window.confirm(`确认按最新价平掉 #${tradeId}？`)) return;
+      button.disabled = true;
+      try {
+        const resp = await fetch(`/api/paper/close?trade_id=${encodeURIComponent(tradeId)}`, {
+          method: "POST",
+        });
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
+        await load(currentDay);
+      } catch (err) {
+        button.disabled = false;
+        alert(`平仓失败：${err.message}`);
+      }
+    });
+
     async function load(day) {
+      currentDay = day || "";
       const query = day ? `?date=${encodeURIComponent(day)}` : "";
       tradesEl.innerHTML = `<div class="empty">加载中…</div>`;
       try {
@@ -159,12 +213,6 @@
         tradesEl.innerHTML = `<div class="error">看板加载失败：${err.message}</div>`;
       }
     }
-
-    daysEl.addEventListener("click", (event) => {
-      const button = event.target.closest("button[data-day]");
-      if (!button) return;
-      load(button.dataset.day);
-    });
 
     load("");
   </script>

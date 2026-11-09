@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   AppState,
   FlatList,
   Platform,
@@ -42,13 +43,16 @@ type BoardTrade = {
   duration: string;
   side_text: string;
   mark: string;
+  can_close?: boolean;
   open_time: string;
   close_time: string | null;
   open_price: number;
   close_price: number | null;
+  last_price?: number | null;
   lots: number;
   fee_open: number;
   net_pnl: number | null;
+  unrealized?: number | null;
   close_reason: string | null;
   tp_price: number;
   sl_price: number;
@@ -396,7 +400,9 @@ function App() {
           board={board}
           loading={boardLoading}
           error={boardError}
+          base={base}
           onSelect={(day) => fetchBoard(day)}
+          onClosed={() => fetchBoard(boardDay || undefined)}
         />
       ) : loading ? (
         <ActivityIndicator color="#E8B86D" style={{ marginTop: 24 }} />
@@ -435,14 +441,41 @@ function BoardPane({
   board,
   loading,
   error,
+  base,
   onSelect,
+  onClosed,
 }: {
   board: BoardData | null;
   loading: boolean;
   error: string;
+  base: string;
   onSelect: (day: string) => void;
+  onClosed: () => void;
 }) {
   const summary = board?.summary;
+  const closeTrade = (item: BoardTrade) => {
+    Alert.alert("手动平仓", `确认按最新价平掉 ${item.name} · ${item.duration}？`, [
+      { text: "取消", style: "cancel" },
+      {
+        text: "平仓",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            const resp = await fetch(`${base}/api/paper/close?trade_id=${item.id}`, {
+              method: "POST",
+            });
+            const body = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+              throw new Error(typeof body.detail === "string" ? body.detail : `HTTP ${resp.status}`);
+            }
+            onClosed();
+          } catch (e) {
+            Alert.alert("平仓失败", e instanceof Error ? e.message : String(e));
+          }
+        },
+      },
+    ]);
+  };
   return (
     <ScrollView contentContainerStyle={styles.list}>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.dayRow}>
@@ -471,23 +504,35 @@ function BoardPane({
       {(board?.trades ?? []).length === 0 && !loading ? (
         <Text style={styles.empty}>这一天没有开仓、平仓或持仓。</Text>
       ) : null}
-      {(board?.trades ?? []).map((item) => (
-        <View key={item.id} style={styles.alert}>
-          <Text style={styles.alertTitle}>
-            {item.name} · {item.duration} · {item.side_text} · {item.mark}
-          </Text>
-          <Text style={styles.alertCode}>{item.symbol}</Text>
-          <Text style={styles.alertTime}>
-            开仓 {item.open_time}　{item.open_price} × {item.lots} 手
-          </Text>
-          <Text style={styles.alertTime}>
-            平仓 {item.close_time || "—"}　{item.close_reason || ""}
-          </Text>
-          <Text style={styles.alertReason}>
-            手续费 {Number(item.fee_open || 0).toFixed(2)}　净盈亏 {moneyText(item.net_pnl)}
-          </Text>
-        </View>
-      ))}
+      {(board?.trades ?? []).map((item) => {
+        const open = !!item.can_close;
+        return (
+          <View key={item.id} style={styles.alert}>
+            <Text style={styles.alertTitle}>
+              {item.name} · {item.duration} · {item.side_text} · {item.mark}
+            </Text>
+            <Text style={styles.alertCode}>{item.symbol}</Text>
+            <Text style={styles.alertTime}>
+              开仓 {item.open_time}　{item.open_price} × {item.lots} 手
+            </Text>
+            <Text style={styles.alertTime}>
+              平仓 {item.close_time || "—"}　{item.close_reason || ""}
+            </Text>
+            {open && item.last_price != null ? (
+              <Text style={styles.alertTime}>现价 {item.last_price}</Text>
+            ) : null}
+            <Text style={styles.alertReason}>
+              手续费 {Number(item.fee_open || 0).toFixed(2)}　
+              {open ? `浮动 ${moneyText(item.unrealized ?? null)}` : `净盈亏 ${moneyText(item.net_pnl)}`}
+            </Text>
+            {open ? (
+              <Pressable style={styles.closeBtn} onPress={() => closeTrade(item)}>
+                <Text style={styles.closeBtnText}>平仓</Text>
+              </Pressable>
+            ) : null}
+          </View>
+        );
+      })}
     </ScrollView>
   );
 }
@@ -566,6 +611,15 @@ const styles = StyleSheet.create({
   alertCode: { color: "#7A8B9A", marginTop: 2, fontSize: 11 },
   alertTime: { color: "#9BB0C1", marginTop: 4, fontSize: 12 },
   alertReason: { color: "#D7E0E8", marginTop: 8, lineHeight: 20 },
+  closeBtn: {
+    alignSelf: "flex-start",
+    marginTop: 10,
+    backgroundColor: "#C45C26",
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  closeBtnText: { color: "#FFF", fontWeight: "700" },
 });
 
 class AppErrorBoundary extends React.Component<

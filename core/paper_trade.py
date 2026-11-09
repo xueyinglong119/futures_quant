@@ -5,6 +5,7 @@
 止盈、止损都从开仓价量出去：头肩顶用「头 − 左肩与头之间的低谷」，
 头肩底用「左肩与头之间的高峰 − 头」，这段高度的 0.8 为止盈距离，0.2 为止损距离。
 开仓价是确认那根已收盘 K 线的收盘价。同一品种同一周期同时只持有一笔。
+每笔最多 8 手，不把可用资金一次开满。看板按最新入库价刷新浮动盈亏，也可手动平仓。
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from pymysql.connections import Connection
 from pymysql.cursors import DictCursor
 
 from config.settings import PROJECT_ROOT
-from core.kline_store import DURATION_LABELS
+from core.kline_store import DURATION_1M, DURATION_5M, DURATION_LABELS, load_bars
 from utils.symbols import get_display_name
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -30,6 +31,7 @@ UTC_DURATIONS = {1800, 3600, 7200, 10800, 14400}
 INITIAL_CASH = 50_000.0
 MARGIN_ADD = 0.01
 FEE_ADD = 0.01
+MAX_LOTS = 8
 # 小于这个数时，交易所字段更像成交额费率，而不是每手元
 _RATIO_CEILING = 0.02
 
@@ -183,7 +185,7 @@ def max_lots(available: float, margin_per_lot: float, fee_per_lot: float) -> int
     cost = margin_per_lot + fee_per_lot
     if available <= 0 or cost <= 0:
         return 0
-    return int(available // cost)
+    return min(MAX_LOTS, int(available // cost))
 
 
 def resolve_exit(
@@ -278,6 +280,7 @@ class PaperBroker:
         self._load()
 
     def on_signal(self, symbol: str, duration_sec: int, when: datetime, df: Any, signal: Any) -> None:
+        self._sync_from_db()
         detail = getattr(signal, "detail", None) or {}
         side = str(detail.get("side") or "")
         swing = _num(detail.get("swing"))
@@ -313,6 +316,7 @@ class PaperBroker:
         )
 
     def on_bar(self, symbol: str, duration_sec: int, when: datetime, bar: dict) -> None:
+        self._sync_from_db()
         pos = self._open.get((symbol, duration_sec))
         if pos is None:
             return
@@ -498,22 +502,16 @@ class PaperBroker:
     def _save_cash(self, cur: Any) -> None:
         cur.execute("UPDATE paper_account SET cash=%s WHERE id=1", (self.cash,))
 
-    def _load(self) -> None:
+    def _sync_from_db(self) -> None:
+        """看板手动平仓后，内存账户要跟库里的本金和持仓对齐。"""
         cur = self.conn.cursor(DictCursor)
         try:
             cur.execute("SELECT initial_cash, cash FROM paper_account WHERE id=1")
             row = cur.fetchone()
             if row is None:
-                cur.execute(
-                    "INSERT INTO paper_account (id, initial_cash, cash) VALUES (1, %s, %s)",
-                    (INITIAL_CASH, INITIAL_CASH),
-                )
-                self.conn.commit()
-                self.initial_cash = INITIAL_CASH
-                self.cash = INITIAL_CASH
-            else:
-                self.initial_cash = float(row["initial_cash"])
-                self.cash = float(row["cash"])
+                return
+            self.initial_cash = float(row["initial_cash"])
+            self.cash = float(row["cash"])
             cur.execute(
                 """
                 SELECT id, symbol, name, duration_sec, duration, side, open_time, open_price,
@@ -521,6 +519,7 @@ class PaperBroker:
                 FROM paper_trade WHERE status='open' ORDER BY id
                 """
             )
+            opened: dict[tuple[str, int], OpenPosition] = {}
             for item in cur.fetchall():
                 pos = OpenPosition(
                     trade_id=int(item["id"]),
@@ -540,9 +539,25 @@ class PaperBroker:
                     sl_price=float(item["sl_price"]),
                     last_price=float(item["last_price"]),
                 )
-                self._open[(pos.symbol, pos.duration_sec)] = pos
+                opened[(pos.symbol, pos.duration_sec)] = pos
+            self._open = opened
         finally:
             cur.close()
+
+    def _load(self) -> None:
+        cur = self.conn.cursor(DictCursor)
+        try:
+            cur.execute("SELECT initial_cash, cash FROM paper_account WHERE id=1")
+            row = cur.fetchone()
+            if row is None:
+                cur.execute(
+                    "INSERT INTO paper_account (id, initial_cash, cash) VALUES (1, %s, %s)",
+                    (INITIAL_CASH, INITIAL_CASH),
+                )
+                self.conn.commit()
+        finally:
+            cur.close()
+        self._sync_from_db()
         self._log(f"账户就绪 初始{self.initial_cash:.2f} 当前本金{self.cash:.2f} 持仓{len(self._open)}笔")
 
     def _log(self, text: str) -> None:
@@ -563,6 +578,50 @@ def ensure_schema(conn: Connection) -> None:
     conn.commit()
 
 
+def latest_mark_price(conn: Connection, symbol: str, duration_sec: int) -> float | None:
+    """优先用 1 分钟、5 分钟最新收盘，没有再用本周期。"""
+    for dur in (DURATION_1M, DURATION_5M, int(duration_sec)):
+        bars = load_bars(conn, symbol, dur, limit=1)
+        if bars:
+            return float(bars[-1]["close"])
+    return None
+
+
+def refresh_open_marks(conn: Connection, positions: list[dict[str, Any]]) -> None:
+    """看板读数前把持仓最新价刷到库里，浮动盈亏才不是开仓价。"""
+    if not positions:
+        return
+    cur = conn.cursor()
+    try:
+        for pos in positions:
+            mark = latest_mark_price(conn, str(pos["symbol"]), int(pos["duration_sec"]))
+            if mark is None:
+                continue
+            pos["last_price"] = mark
+            cur.execute(
+                "UPDATE paper_trade SET last_price=%s WHERE id=%s AND status='open'",
+                (mark, int(pos["id"])),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+def position_unrealized(pos: dict[str, Any]) -> float:
+    return money(
+        price_pnl(
+            str(pos["side"]),
+            float(pos["open_price"]),
+            float(pos["last_price"]),
+            float(pos["multiplier"]),
+            int(pos["lots"]),
+        )
+    )
+
+
 def account_snapshot(conn: Connection, limit: int = 100) -> dict[str, Any]:
     ensure_schema(conn)
     cur = conn.cursor(DictCursor)
@@ -578,7 +637,7 @@ def account_snapshot(conn: Connection, limit: int = 100) -> dict[str, Any]:
             account = {"initial_cash": INITIAL_CASH, "cash": INITIAL_CASH}
         cur.execute(
             """
-            SELECT id, symbol, name, duration, side, kind, open_time, open_price, lots,
+            SELECT id, symbol, name, duration_sec, duration, side, kind, open_time, open_price, lots,
                    margin_rate, margin, fee_open, swing, extreme, head, tp_price, sl_price,
                    last_price, multiplier, equity_after_open, reason
             FROM paper_trade WHERE status='open' ORDER BY id
@@ -599,11 +658,13 @@ def account_snapshot(conn: Connection, limit: int = 100) -> dict[str, Any]:
     finally:
         cur.close()
 
+    refresh_open_marks(conn, positions)
     unrealized = 0.0
     margin_used = 0.0
     for pos in positions:
-        sign = -1.0 if pos["side"] == "short" else 1.0
-        unrealized += (float(pos["last_price"]) - float(pos["open_price"])) * sign * float(pos["multiplier"]) * int(pos["lots"])
+        pnl = position_unrealized(pos)
+        pos["unrealized"] = pnl
+        unrealized += pnl
         margin_used += float(pos["margin"])
     cash = float(account["cash"])
     equity = cash + unrealized
@@ -618,6 +679,82 @@ def account_snapshot(conn: Connection, limit: int = 100) -> dict[str, Any]:
         "open_count": len(positions),
         "positions": positions,
         "trades": trades,
+    }
+
+
+def store_clock_now(duration_sec: int) -> datetime:
+    """按该周期的库存时区写入平仓时间。"""
+    now = datetime.now(SHANGHAI).replace(tzinfo=None, microsecond=0)
+    if int(duration_sec) in UTC_DURATIONS:
+        return now - timedelta(hours=8)
+    return now
+
+
+def manual_close(conn: Connection, trade_id: int) -> dict[str, Any]:
+    """看板手动平仓。按最新入库价成交，原因记为手动。"""
+    ensure_schema(conn)
+    cur = conn.cursor(DictCursor)
+    try:
+        cur.execute(
+            """
+            SELECT id, symbol, name, duration_sec, duration, side, open_price, lots,
+                   multiplier, fee_per_lot, fee_open, last_price
+            FROM paper_trade WHERE id=%s AND status='open'
+            """,
+            (int(trade_id),),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError("这笔单已经平仓或不存在")
+        cur.execute("SELECT cash FROM paper_account WHERE id=1")
+        account = cur.fetchone()
+        if account is None:
+            raise ValueError("模拟账户不存在")
+        cash = float(account["cash"])
+        mark = latest_mark_price(conn, str(row["symbol"]), int(row["duration_sec"]))
+        if mark is None:
+            mark = float(row["last_price"])
+        if mark <= 0:
+            raise ValueError("没有可用平仓价")
+        when = store_clock_now(int(row["duration_sec"]))
+        fee_close = money(float(row["fee_per_lot"]) * int(row["lots"]))
+        gross = money(
+            price_pnl(
+                str(row["side"]),
+                float(row["open_price"]),
+                mark,
+                float(row["multiplier"]),
+                int(row["lots"]),
+            )
+        )
+        net = money(gross - float(row["fee_open"]) - fee_close)
+        cash = money(cash + gross - fee_close)
+        cur.execute(
+            """
+            UPDATE paper_trade
+            SET status='closed', close_time=%s, close_price=%s, close_reason=%s,
+                fee_close=%s, gross_pnl=%s, net_pnl=%s, equity_after_close=%s, last_price=%s
+            WHERE id=%s AND status='open'
+            """,
+            (when, mark, "手动", fee_close, gross, net, cash, mark, int(trade_id)),
+        )
+        if cur.rowcount != 1:
+            raise ValueError("这笔单已经平仓或不存在")
+        cur.execute("UPDATE paper_account SET cash=%s WHERE id=1", (cash,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+    return {
+        "id": int(trade_id),
+        "close_price": mark,
+        "fee_close": fee_close,
+        "gross_pnl": gross,
+        "net_pnl": net,
+        "cash": cash,
+        "close_reason": "手动",
     }
 
 
@@ -660,7 +797,7 @@ def trading_board(conn: Connection, day: date | None = None) -> dict[str, Any]:
                    open_time, open_price, lots, fee_open, fee_close,
                    close_time, close_price, close_reason,
                    gross_pnl, net_pnl, equity_after_open, equity_after_close,
-                   tp_price, sl_price, margin
+                   tp_price, sl_price, margin, last_price, multiplier
             FROM paper_trade
             ORDER BY id
             """
@@ -668,6 +805,19 @@ def trading_board(conn: Connection, day: date | None = None) -> dict[str, Any]:
         rows = [_row(item) for item in cur.fetchall()]
     finally:
         cur.close()
+    open_marks = {
+        int(pos["id"]): pos
+        for pos in snap.get("positions") or []
+        if pos.get("id") is not None
+    }
+    for row in rows:
+        if row.get("status") != "open":
+            continue
+        marked = open_marks.get(int(row["id"]))
+        if marked is None:
+            continue
+        row["last_price"] = marked.get("last_price", row.get("last_price"))
+        row["unrealized"] = marked.get("unrealized")
     return _assemble_board(rows, snap, selected, today)
 
 
@@ -763,6 +913,10 @@ def _assemble_board(
 
 
 def _board_trade(row: dict[str, Any], open_bj: datetime, close_bj: datetime | None, mark: str) -> dict[str, Any]:
+    open_status = row.get("status") == "open"
+    unrealized = row.get("unrealized")
+    if open_status and unrealized is None and row.get("last_price") is not None:
+        unrealized = position_unrealized(row)
     return {
         "id": row["id"],
         "name": row.get("name") or "",
@@ -773,14 +927,17 @@ def _board_trade(row: dict[str, Any], open_bj: datetime, close_bj: datetime | No
         "kind": row.get("kind") or "",
         "status": row.get("status") or "",
         "mark": mark,
+        "can_close": open_status,
         "open_time": format_bj(open_bj),
         "close_time": None if close_bj is None else format_bj(close_bj),
         "open_price": row.get("open_price"),
         "close_price": row.get("close_price"),
+        "last_price": row.get("last_price") if open_status else None,
         "lots": row.get("lots"),
         "fee_open": row.get("fee_open"),
         "fee_close": row.get("fee_close"),
         "net_pnl": row.get("net_pnl"),
+        "unrealized": unrealized,
         "close_reason": row.get("close_reason"),
         "tp_price": row.get("tp_price"),
         "sl_price": row.get("sl_price"),

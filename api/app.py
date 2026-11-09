@@ -20,7 +20,7 @@ from core.indicators import (
     latest_indicator_snapshot,
 )
 from core.kline_store import LABEL_TO_DURATION, connect, ensure_table, load_bars
-from core.paper_trade import account_snapshot, trading_board
+from core.paper_trade import account_snapshot, manual_close, trading_board
 from core.market_data import DEFAULT_KLINE_SECONDS, get_today_klines
 from core.push_notify import send_alert_push
 
@@ -235,6 +235,20 @@ def api_paper_board(
     conn = connect()
     try:
         return trading_board(conn, selected)
+    finally:
+        conn.close()
+
+
+@app.post("/api/paper/close")
+def api_paper_close(trade_id: int = Query(..., ge=1, description="持仓单号")) -> dict[str, Any]:
+    """手动平掉一笔模拟持仓，按最新入库价成交。"""
+    conn = connect()
+    try:
+        try:
+            result = manual_close(conn, trade_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, **result}
     finally:
         conn.close()
 
