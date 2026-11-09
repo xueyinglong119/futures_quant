@@ -49,7 +49,11 @@ TAIL_LENGTH: dict[int, int] = {
 
 
 def in_trading_window(now: datetime) -> bool:
-    """商品期货可能有成交的时段（日盘、夜盘，含开盘前 2 分钟）。"""
+    """商品期货可能有成交的时段（日盘、夜盘，含开盘前 2 分钟）。
+
+    11:30–13:30 午休不看行情。上午留到 11:35，让 11:30 那根收完；
+    下午 13:28 再连，留出重新订阅的时间。
+    """
     if now.tzinfo is None:
         now = now.replace(tzinfo=TZ)
     else:
@@ -60,8 +64,12 @@ def in_trading_window(now: datetime) -> bool:
         return wd in (6, 0, 1, 2, 3, 4)  # 周日到周五夜盘
     if hm <= 2 * 60 + 40:
         return wd in (0, 1, 2, 3, 4, 5)  # 夜盘延续到次日凌晨，含周六凌晨
-    if 8 * 60 + 58 <= hm <= 15 * 60 + 5:
-        return wd <= 4
+    if wd > 4:
+        return False
+    if 8 * 60 + 58 <= hm <= 11 * 60 + 35:
+        return True
+    if 13 * 60 + 28 <= hm <= 15 * 60 + 5:
+        return True
     return False
 
 
