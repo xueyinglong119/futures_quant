@@ -589,13 +589,14 @@ def ensure_schema(conn: Connection) -> None:
         cur.execute(CREATE_TRADE_SQL)
         cur.execute(
             """
-            SELECT COUNT(*) AS n FROM information_schema.COLUMNS
+            SELECT COUNT(*) FROM information_schema.COLUMNS
             WHERE TABLE_SCHEMA = DATABASE()
               AND TABLE_NAME = 'paper_trade'
               AND COLUMN_NAME = 'alert_id'
             """
         )
-        has_alert_id = int((cur.fetchone() or {}).get("n") or 0) > 0
+        row = cur.fetchone()
+        has_alert_id = bool(row) and int(row[0]) > 0
         if not has_alert_id:
             cur.execute(
                 "ALTER TABLE paper_trade "
