@@ -10,3 +10,4 @@ class Signal:
     target_volume: int
     action: str
     reason: str
+    detail: dict | None = None

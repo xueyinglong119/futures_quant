@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from core.hs_monitor import (
     load_tf_df,
 )
 from core.kline_fetch import wait_klines_ready
+from core.paper_trade import PaperBroker
 from core.kline_store import (
     DURATION_LABELS,
     connect,
@@ -182,6 +184,7 @@ class RealtimePipeline:
         self.settings = settings or load_settings()
         self.alert_log = alert_log
         self.engine = HsMonitorEngine()
+        self.broker: PaperBroker | None = None
         self._states: dict[tuple[str, int], _SeriesState] = {}
 
     def run_session(self) -> None:
@@ -190,6 +193,15 @@ class RealtimePipeline:
         api = TqApi(auth=TqAuth(cfg.auth.user, cfg.auth.password))
         conn = connect()
         ensure_table(conn)
+        self.engine.on_signal = None
+        try:
+            self.broker = PaperBroker(conn, api)
+            self.engine.on_signal = self.broker.on_signal
+        except Exception:
+            traceback.print_exc()
+            print("[paper] 模拟账户初始化失败，本时段只告警不开仓", flush=True)
+            self.broker = None
+            self.engine.on_signal = None
         try:
             symbols = list_commodity_mains(api)
             print(f"[pipeline] 品种 {len(symbols)}", flush=True)
@@ -276,6 +288,11 @@ class RealtimePipeline:
         for row in fresh:
             state.frame = _append_frame(state.frame, row["stored"], row, lookback)
             state.watermark = row["stored"]
+            if self.broker is not None:
+                try:
+                    self.broker.on_bar(symbol, duration_sec, row["stored"], row)
+                except Exception:
+                    traceback.print_exc()
             alerts += self.engine.evaluate_df(
                 symbol,
                 duration_sec,

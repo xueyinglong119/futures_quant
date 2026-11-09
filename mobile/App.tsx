@@ -103,20 +103,7 @@ function productNameFromSymbol(symbol: string): string {
   return symbol.startsWith("KQ.m@") ? `${name}主连` : name;
 }
 
-async function registerForPush(apiBase: string): Promise<string> {
-  if (!Device.isDevice) {
-    return "模拟器无法注册推送";
-  }
-  const { status: existing } = await Notifications.getPermissionsAsync();
-  let finalStatus = existing;
-  if (existing !== "granted") {
-    const { status } = await Notifications.requestPermissionsAsync();
-    finalStatus = status;
-  }
-  if (finalStatus !== "granted") {
-    return "未授予通知权限";
-  }
-
+async function ensureNotifyPermission(): Promise<boolean> {
   if (Platform.OS === "android") {
     await Notifications.setNotificationChannelAsync("alerts", {
       name: "形态告警",
@@ -124,6 +111,56 @@ async function registerForPush(apiBase: string): Promise<string> {
       vibrationPattern: [0, 250, 250, 250],
       lightColor: "#E8B86D",
     });
+  }
+  const { status: existing } = await Notifications.getPermissionsAsync();
+  let finalStatus = existing;
+  if (existing !== "granted") {
+    const { status } = await Notifications.requestPermissionsAsync();
+    finalStatus = status;
+  }
+  return finalStatus === "granted";
+}
+
+function alertTitle(item: AlertItem): string {
+  const code = item.extra?.code || item.symbol;
+  const name = item.extra?.name || productNameFromSymbol(code);
+  const duration = item.extra?.duration ? ` · ${item.extra.duration}` : "";
+  return `${name}${duration} · ${item.kind}`;
+}
+
+async function showLocalAlerts(items: AlertItem[]): Promise<void> {
+  const shown = items.slice(0, 5);
+  for (const item of shown) {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: alertTitle(item),
+        body: item.reason,
+        sound: "default",
+        data: { id: item.id },
+      },
+      trigger: null,
+    });
+  }
+  const rest = items.length - shown.length;
+  if (rest > 0) {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: "期货形态告警",
+        body: `另有 ${rest} 条新告警，打开 App 查看`,
+        sound: "default",
+      },
+      trigger: null,
+    });
+  }
+}
+
+async function registerForPush(apiBase: string): Promise<string> {
+  if (!Device.isDevice) {
+    return "模拟器无法注册推送";
+  }
+  const granted = await ensureNotifyPermission();
+  if (!granted) {
+    return "未授予通知权限";
   }
 
   const projectId =
@@ -152,6 +189,7 @@ function App() {
   const [error, setError] = useState("");
   const [pushStatus, setPushStatus] = useState("推送未注册");
   const knownIds = useRef<Set<string>>(new Set());
+  const seeded = useRef(false);
   const appState = useRef(AppState.currentState);
 
   const base = useMemo(() => apiBase.replace(/\/$/, ""), [apiBase]);
@@ -178,8 +216,17 @@ function App() {
       }
       const data = await resp.json();
       const items: AlertItem[] = data.alerts ?? [];
+      const fresh = items.filter((item) => !knownIds.current.has(item.id));
       for (const item of items) {
         knownIds.current.add(item.id);
+      }
+      if (seeded.current && fresh.length > 0) {
+        const allowed = await ensureNotifyPermission();
+        if (allowed) {
+          await showLocalAlerts(fresh);
+        }
+      } else {
+        seeded.current = true;
       }
       setAlerts(items);
       setError("");
@@ -201,7 +248,7 @@ function App() {
         /FirebaseApp|fcm-credentials|getExpoPushTokenAsync|Default FirebaseApp/i.test(
           raw
         );
-      setPushStatus(isFcm ? "" : raw);
+      setPushStatus(isFcm ? "通知已开启，新告警会显示在通知栏" : raw);
     }
   }, [base]);
 
@@ -211,6 +258,7 @@ function App() {
 
   useEffect(() => {
     knownIds.current = new Set();
+    seeded.current = false;
     setLoading(true);
     fetchAlerts();
     setupPush();

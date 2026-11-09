@@ -64,13 +64,13 @@ class HeadShouldersStrategy:
         traded = self._traded_patterns.setdefault(symbol, set())
 
         top_signal = self._detect_head_shoulders_top(
-            pivot_highs, pivot_lows, klines.close, volume, traded, symbol
+            pivot_highs, pivot_lows, klines, volume, traded, symbol
         )
         if top_signal is not None:
             return top_signal
 
         return self._detect_head_shoulders_bottom(
-            pivot_lows, pivot_highs, klines.close, volume, traded, symbol
+            pivot_lows, pivot_highs, klines, volume, traded, symbol
         )
 
     def check_exit(
@@ -171,11 +171,29 @@ class HeadShouldersStrategy:
             neck=neck,
         )
 
+    def _swing_low(self, lows: pd.Series, idx_l: int, idx_h: int) -> float | None:
+        """左肩和头之间的最低价，不含两根拐点本身。"""
+        if idx_h <= idx_l + 1:
+            return None
+        seg = lows.iloc[idx_l + 1 : idx_h]
+        if seg.empty:
+            return None
+        return float(seg.min())
+
+    def _swing_high(self, highs: pd.Series, idx_l: int, idx_h: int) -> float | None:
+        """左肩和头之间的最高价，不含两根拐点本身。"""
+        if idx_h <= idx_l + 1:
+            return None
+        seg = highs.iloc[idx_l + 1 : idx_h]
+        if seg.empty:
+            return None
+        return float(seg.max())
+
     def _detect_head_shoulders_top(
         self,
         pivot_highs: list[tuple[int, float]],
         pivot_lows: list[tuple[int, float]],
-        closes: pd.Series,
+        klines: pd.DataFrame,
         volume: int,
         traded: set[str],
         symbol: str,
@@ -183,6 +201,7 @@ class HeadShouldersStrategy:
         if len(pivot_highs) < 3:
             return None
 
+        closes = klines.close
         last_idx = len(closes) - 1
 
         for i in range(len(pivot_highs) - 2):
@@ -211,6 +230,8 @@ class HeadShouldersStrategy:
             if self._right_shoulder_confirmed(idx_r, last_idx):
                 traded.add(pattern_id)
                 self._register_short(symbol, price_h, neck)
+                valley = self._swing_low(klines.low, idx_l, idx_h)
+                swing = None if valley is None else price_h - valley
                 return Signal(
                     target_volume=-volume,
                     action="sell",
@@ -218,6 +239,15 @@ class HeadShouldersStrategy:
                         f"头肩顶右肩 左{price_l:.0f} 头{price_h:.0f} "
                         f"右{price_r:.0f} 颈{neck:.0f}"
                     ),
+                    detail={
+                        "side": "short",
+                        "left": price_l,
+                        "head": price_h,
+                        "right": price_r,
+                        "neck": neck,
+                        "extreme": valley,
+                        "swing": swing,
+                    },
                 )
 
         return None
@@ -226,7 +256,7 @@ class HeadShouldersStrategy:
         self,
         pivot_lows: list[tuple[int, float]],
         pivot_highs: list[tuple[int, float]],
-        closes: pd.Series,
+        klines: pd.DataFrame,
         volume: int,
         traded: set[str],
         symbol: str,
@@ -234,6 +264,7 @@ class HeadShouldersStrategy:
         if len(pivot_lows) < 3:
             return None
 
+        closes = klines.close
         last_idx = len(closes) - 1
 
         for i in range(len(pivot_lows) - 2):
@@ -262,6 +293,8 @@ class HeadShouldersStrategy:
             if self._right_shoulder_confirmed(idx_r, last_idx):
                 traded.add(pattern_id)
                 self._register_long(symbol, price_h, neck)
+                peak = self._swing_high(klines.high, idx_l, idx_h)
+                swing = None if peak is None else peak - price_h
                 return Signal(
                     target_volume=volume,
                     action="buy",
@@ -269,6 +302,15 @@ class HeadShouldersStrategy:
                         f"头肩底右肩 左{price_l:.0f} 头{price_h:.0f} "
                         f"右{price_r:.0f} 颈{neck:.0f}"
                     ),
+                    detail={
+                        "side": "long",
+                        "left": price_l,
+                        "head": price_h,
+                        "right": price_r,
+                        "neck": neck,
+                        "extreme": peak,
+                        "swing": swing,
+                    },
                 )
 
         return None

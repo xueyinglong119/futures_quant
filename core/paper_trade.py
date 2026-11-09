@@ -1,0 +1,634 @@
+"""头肩告警触发后的模拟账户。
+
+本金 5 万元。保证金按交易所每手保证金折成比例后再加 1 个百分点。
+手续费按交易所每手手续费再加 1 分（0.01 元）。
+止盈、止损都从开仓价量出去：头肩顶用「头 − 左肩与头之间的低谷」，
+头肩底用「左肩与头之间的高峰 − 头」，这段高度的 0.8 为止盈距离，0.2 为止损距离。
+开仓价是确认那根已收盘 K 线的收盘价。同一品种同一周期同时只持有一笔。
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from pymysql.connections import Connection
+from pymysql.cursors import DictCursor
+
+from config.settings import PROJECT_ROOT
+from core.kline_store import DURATION_LABELS
+from utils.symbols import get_display_name
+
+INITIAL_CASH = 50_000.0
+MARGIN_ADD = 0.01
+FEE_ADD = 0.01
+# 小于这个数时，交易所字段更像成交额费率，而不是每手元
+_RATIO_CEILING = 0.02
+
+_LOG_PATH = PROJECT_ROOT / "reports" / "paper_trades.log"
+
+CREATE_ACCOUNT_SQL = """
+CREATE TABLE IF NOT EXISTS `paper_account` (
+  `id` INT NOT NULL,
+  `initial_cash` DOUBLE NOT NULL,
+  `cash` DOUBLE NOT NULL,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='模拟账户'
+"""
+
+CREATE_TRADE_SQL = """
+CREATE TABLE IF NOT EXISTS `paper_trade` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `symbol` VARCHAR(64) NOT NULL,
+  `name` VARCHAR(32) NOT NULL,
+  `duration_sec` INT NOT NULL,
+  `duration` VARCHAR(8) NOT NULL,
+  `side` VARCHAR(8) NOT NULL COMMENT 'long/short',
+  `kind` VARCHAR(16) NOT NULL,
+  `open_time` DATETIME NOT NULL,
+  `open_price` DOUBLE NOT NULL,
+  `lots` INT NOT NULL,
+  `multiplier` DOUBLE NOT NULL,
+  `exchange_margin` DOUBLE NOT NULL COMMENT '交易所每手保证金',
+  `margin_rate` DOUBLE NOT NULL,
+  `margin` DOUBLE NOT NULL COMMENT '本笔占用保证金',
+  `exchange_fee` DOUBLE NOT NULL COMMENT '交易所每手手续费',
+  `fee_per_lot` DOUBLE NOT NULL,
+  `fee_open` DOUBLE NOT NULL,
+  `swing` DOUBLE NOT NULL COMMENT '头到左肩之间低谷或高峰的高度',
+  `extreme` DOUBLE NOT NULL,
+  `head` DOUBLE NOT NULL,
+  `tp_price` DOUBLE NOT NULL,
+  `sl_price` DOUBLE NOT NULL,
+  `equity_after_open` DOUBLE NOT NULL,
+  `last_price` DOUBLE NOT NULL,
+  `status` VARCHAR(16) NOT NULL,
+  `close_time` DATETIME NULL,
+  `close_price` DOUBLE NULL,
+  `close_reason` VARCHAR(16) NULL,
+  `fee_close` DOUBLE NULL,
+  `gross_pnl` DOUBLE NULL,
+  `net_pnl` DOUBLE NULL,
+  `equity_after_close` DOUBLE NULL,
+  `reason` VARCHAR(255) NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_status` (`status`),
+  KEY `idx_symbol_dur` (`symbol`, `duration_sec`, `status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='模拟成交'
+"""
+
+
+@dataclass
+class ContractSpec:
+    multiplier: float
+    price_tick: float
+    exchange_margin: float
+    exchange_fee: float
+    pre_settlement: float
+
+
+@dataclass
+class OpenPosition:
+    trade_id: int
+    symbol: str
+    name: str
+    duration_sec: int
+    duration: str
+    side: str
+    open_time: datetime
+    open_price: float
+    lots: int
+    multiplier: float
+    margin: float
+    fee_per_lot: float
+    fee_open: float
+    tp_price: float
+    sl_price: float
+    last_price: float
+
+
+def _num(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return number
+
+
+def round_tick(price: float, tick: float) -> float:
+    if tick <= 0 or math.isnan(tick):
+        return price
+    decimals = max(0, min(8, _tick_decimals(tick)))
+    return round(round(price / tick) * tick, decimals)
+
+
+def _tick_decimals(tick: float) -> int:
+    text = f"{tick:.8f}".rstrip("0")
+    if "." not in text:
+        return 0
+    return len(text.split(".", 1)[1])
+
+
+def money(value: float) -> float:
+    return round(float(value), 2)
+
+
+def target_prices(side: str, entry: float, swing: float, tick: float) -> tuple[float, float]:
+    """返回 (止盈价, 止损价)。距离分别是形态高度的 0.8 和 0.2。"""
+    tp_dist = swing * 0.8
+    sl_dist = swing * 0.2
+    if side == "short":
+        tp_price, sl_price = entry - tp_dist, entry + sl_dist
+    else:
+        tp_price, sl_price = entry + tp_dist, entry - sl_dist
+    return round_tick(tp_price, tick), round_tick(sl_price, tick)
+
+
+def margin_quote(entry: float, multiplier: float, exchange_margin: float, pre_settlement: float) -> tuple[float, float]:
+    """返回 (保证金比例, 每手保证金)。比例 = 交易所比例 + 1 个百分点。"""
+    ref = pre_settlement if pre_settlement and pre_settlement > 0 else entry
+    notional_ref = ref * multiplier
+    if notional_ref <= 0 or entry <= 0 or multiplier <= 0:
+        raise ValueError("合约名义价值无效")
+    if 0 < exchange_margin < 1:
+        rate = exchange_margin
+    else:
+        rate = exchange_margin / notional_ref
+    rate += MARGIN_ADD
+    per_lot = entry * multiplier * rate
+    return rate, per_lot
+
+
+def fee_quote(exchange_fee: float, notional: float) -> float:
+    """每手手续费 = 交易所收费 + 0.01 元。小于 0.02 的数按成交额费率理解。"""
+    if 0 <= exchange_fee < _RATIO_CEILING:
+        base = notional * exchange_fee
+    else:
+        base = exchange_fee
+    return base + FEE_ADD
+
+
+def max_lots(available: float, margin_per_lot: float, fee_per_lot: float) -> int:
+    cost = margin_per_lot + fee_per_lot
+    if available <= 0 or cost <= 0:
+        return 0
+    return int(available // cost)
+
+
+def resolve_exit(
+    side: str,
+    open_price: float,
+    high: float,
+    low: float,
+    tp_price: float,
+    sl_price: float,
+) -> tuple[str, float] | None:
+    """这根 K 线是否该平仓。同一根同时碰到止盈和止损时按止损成交。跳空按开盘价成交。"""
+    if side == "short":
+        if open_price >= sl_price:
+            return "止损", open_price
+        if open_price <= tp_price:
+            return "止盈", open_price
+        hit_sl = high >= sl_price
+        hit_tp = low <= tp_price
+    else:
+        if open_price <= sl_price:
+            return "止损", open_price
+        if open_price >= tp_price:
+            return "止盈", open_price
+        hit_sl = low <= sl_price
+        hit_tp = high >= tp_price
+    if hit_sl:
+        return "止损", sl_price
+    if hit_tp:
+        return "止盈", tp_price
+    return None
+
+
+def price_pnl(side: str, entry: float, exit_price: float, multiplier: float, lots: int) -> float:
+    sign = -1.0 if side == "short" else 1.0
+    return (exit_price - entry) * sign * multiplier * lots
+
+
+class ContractBook:
+    """从天勤合约资料读取乘数、保证金和手续费。主连用标的合约的数字。"""
+
+    def __init__(self, api: Any):
+        self.api = api
+        self._cache: dict[str, ContractSpec | None] = {}
+
+    def get(self, symbol: str) -> ContractSpec | None:
+        if symbol not in self._cache:
+            self._cache[symbol] = self._load(symbol)
+        return self._cache[symbol]
+
+    def _load(self, symbol: str) -> ContractSpec | None:
+        symbols = [symbol]
+        underlying = self._field(symbol, "underlying_symbol")
+        if isinstance(underlying, str) and underlying and underlying != symbol:
+            symbols.append(underlying)
+        margin = fee = multiple = tick = presettle = None
+        for src in symbols:
+            margin = margin if margin is not None else self._num_field(src, "margin")
+            fee = fee if fee is not None else self._num_field(src, "commission")
+            multiple = multiple if multiple is not None else self._num_field(src, "volume_multiple")
+            tick = tick if tick is not None else self._num_field(src, "price_tick")
+            presettle = presettle if presettle is not None else self._num_field(src, "pre_settlement")
+        if multiple is None or multiple <= 0 or margin is None or margin <= 0 or fee is None or fee < 0:
+            return None
+        return ContractSpec(
+            multiplier=float(multiple),
+            price_tick=float(tick or 0),
+            exchange_margin=float(margin),
+            exchange_fee=float(fee),
+            pre_settlement=float(presettle or 0),
+        )
+
+    def _field(self, symbol: str, key: str) -> Any:
+        quote = self.api.get_quote(symbol)
+        if key in quote and quote[key] not in ("", None):
+            return quote[key]
+        raw = getattr(self.api, "_data", {}).get("quotes", {}).get(symbol, {})
+        return raw.get(key)
+
+    def _num_field(self, symbol: str, key: str) -> float | None:
+        return _num(self._field(symbol, key))
+
+
+class PaperBroker:
+    def __init__(self, conn: Connection, api: Any, log_path: Path | None = None):
+        self.conn = conn
+        self.specs = ContractBook(api)
+        self.log_path = log_path or _LOG_PATH
+        self.initial_cash = INITIAL_CASH
+        self.cash = INITIAL_CASH
+        self._open: dict[tuple[str, int], OpenPosition] = {}
+        ensure_schema(conn)
+        self._load()
+
+    def on_signal(self, symbol: str, duration_sec: int, when: datetime, df: Any, signal: Any) -> None:
+        detail = getattr(signal, "detail", None) or {}
+        side = str(detail.get("side") or "")
+        swing = _num(detail.get("swing"))
+        extreme = _num(detail.get("extreme"))
+        head = _num(detail.get("head"))
+        if side not in ("long", "short") or swing is None or swing <= 0 or extreme is None or head is None:
+            self._log(f"跳过 {symbol} {when}：没有可用的头到左肩高度")
+            return
+        if (symbol, duration_sec) in self._open:
+            self._log(f"跳过 {symbol} {when}：该周期已有持仓")
+            return
+        if df is None or len(df) == 0:
+            return
+        entry = float(df.iloc[-1]["close"])
+        if entry <= 0:
+            return
+        spec = self.specs.get(symbol)
+        if spec is None:
+            self._log(f"跳过 {get_display_name(symbol)} {when}：没有交易所保证金或手续费")
+            return
+        self._open_trade(
+            symbol=symbol,
+            duration_sec=duration_sec,
+            when=_as_naive(when),
+            side=side,
+            entry=entry,
+            swing=swing,
+            extreme=extreme,
+            head=head,
+            spec=spec,
+            kind="头肩顶" if side == "short" else "头肩底",
+            reason=str(getattr(signal, "reason", "") or ""),
+        )
+
+    def on_bar(self, symbol: str, duration_sec: int, when: datetime, bar: dict) -> None:
+        pos = self._open.get((symbol, duration_sec))
+        if pos is None:
+            return
+        when = _as_naive(when)
+        high = float(bar["high"])
+        low = float(bar["low"])
+        opened = float(bar["open"])
+        close = float(bar["close"])
+        hit = resolve_exit(pos.side, opened, high, low, pos.tp_price, pos.sl_price)
+        if hit is None:
+            pos.last_price = close
+            self._update_last_price(pos)
+            return
+        reason, exit_price = hit
+        self._close_trade(pos, when, reason, exit_price)
+
+    def snapshot(self) -> dict[str, Any]:
+        return account_snapshot(self.conn)
+
+    def _open_trade(
+        self,
+        *,
+        symbol: str,
+        duration_sec: int,
+        when: datetime,
+        side: str,
+        entry: float,
+        swing: float,
+        extreme: float,
+        head: float,
+        spec: ContractSpec,
+        kind: str,
+        reason: str,
+    ) -> None:
+        rate, margin_lot = margin_quote(entry, spec.multiplier, spec.exchange_margin, spec.pre_settlement)
+        notional = entry * spec.multiplier
+        fee_lot = fee_quote(spec.exchange_fee, notional)
+        lots = max_lots(self._available(), margin_lot, fee_lot)
+        label = DURATION_LABELS.get(duration_sec, str(duration_sec))
+        name = get_display_name(symbol)
+        if lots < 1:
+            self._log(
+                f"跳过 {name} {label} {when:%m-%d %H:%M}："
+                f"可用 {self._available():.2f} 不够 1 手保证金 {margin_lot:.2f}"
+            )
+            return
+        tp_price, sl_price = target_prices(side, entry, swing, spec.price_tick)
+        fee_open = money(fee_lot * lots)
+        margin = money(margin_lot * lots)
+        if self.cash - fee_open <= 0:
+            self._log(f"跳过 {name} {label}：开仓手续费后本金不足")
+            return
+        self.cash = money(self.cash - fee_open)
+        equity = money(self._equity_assuming(extra_unrealized=0))
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                """
+                INSERT INTO paper_trade (
+                  symbol, name, duration_sec, duration, side, kind,
+                  open_time, open_price, lots, multiplier,
+                  exchange_margin, margin_rate, margin,
+                  exchange_fee, fee_per_lot, fee_open,
+                  swing, extreme, head, tp_price, sl_price,
+                  equity_after_open, last_price, status, reason
+                ) VALUES (
+                  %s,%s,%s,%s,%s,%s,
+                  %s,%s,%s,%s,
+                  %s,%s,%s,
+                  %s,%s,%s,
+                  %s,%s,%s,%s,%s,
+                  %s,%s,'open',%s
+                )
+                """,
+                (
+                    symbol, name, duration_sec, label, side, kind,
+                    when, entry, lots, spec.multiplier,
+                    spec.exchange_margin, rate, margin,
+                    spec.exchange_fee, fee_lot, fee_open,
+                    swing, extreme, head, tp_price, sl_price,
+                    equity, entry, reason[:255],
+                ),
+            )
+            trade_id = int(cur.lastrowid)
+            self._save_cash(cur)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            self.cash = money(self.cash + fee_open)
+            raise
+        finally:
+            cur.close()
+        pos = OpenPosition(
+            trade_id=trade_id,
+            symbol=symbol,
+            name=name,
+            duration_sec=duration_sec,
+            duration=label,
+            side=side,
+            open_time=when,
+            open_price=entry,
+            lots=lots,
+            multiplier=spec.multiplier,
+            margin=margin,
+            fee_per_lot=fee_lot,
+            fee_open=fee_open,
+            tp_price=tp_price,
+            sl_price=sl_price,
+            last_price=entry,
+        )
+        self._open[(symbol, duration_sec)] = pos
+        side_text = "空" if side == "short" else "多"
+        self._log(
+            f"开仓 {name} {label} {side_text} {when:%m-%d %H:%M} "
+            f"价{entry:g} {lots}手 保证金{margin:.2f} 比例{rate:.4f} "
+            f"手续费{fee_open:.2f} 止盈{tp_price:g} 止损{sl_price:g} 本金{equity:.2f}"
+        )
+
+    def _close_trade(self, pos: OpenPosition, when: datetime, reason: str, exit_price: float) -> None:
+        fee_close = money(pos.fee_per_lot * pos.lots)
+        gross = money(price_pnl(pos.side, pos.open_price, exit_price, pos.multiplier, pos.lots))
+        net = money(gross - pos.fee_open - fee_close)
+        self._open.pop((pos.symbol, pos.duration_sec), None)
+        self.cash = money(self.cash + gross - fee_close)
+        equity = money(self._equity_assuming(extra_unrealized=0))
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                """
+                UPDATE paper_trade
+                SET status='closed', close_time=%s, close_price=%s, close_reason=%s,
+                    fee_close=%s, gross_pnl=%s, net_pnl=%s, equity_after_close=%s, last_price=%s
+                WHERE id=%s AND status='open'
+                """,
+                (when, exit_price, reason, fee_close, gross, net, equity, exit_price, pos.trade_id),
+            )
+            self._save_cash(cur)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            self.cash = money(self.cash - gross + fee_close)
+            self._open[(pos.symbol, pos.duration_sec)] = pos
+            raise
+        finally:
+            cur.close()
+        side_text = "空" if pos.side == "short" else "多"
+        self._log(
+            f"平仓 {pos.name} {pos.duration} {side_text} {reason} {when:%m-%d %H:%M} "
+            f"价{exit_price:g} 价差盈亏{gross:.2f} 平仓手续费{fee_close:.2f} "
+            f"开仓手续费{pos.fee_open:.2f} 净盈亏{net:.2f} 本金{equity:.2f}"
+        )
+
+    def _update_last_price(self, pos: OpenPosition) -> None:
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                "UPDATE paper_trade SET last_price=%s WHERE id=%s AND status='open'",
+                (pos.last_price, pos.trade_id),
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        finally:
+            cur.close()
+
+    def _available(self) -> float:
+        # 浮动盈利不算可开仓资金，浮动亏损要先扣掉
+        return self.cash + min(0.0, self._unrealized()) - self._margin_used()
+
+    def _margin_used(self) -> float:
+        return sum(pos.margin for pos in self._open.values())
+
+    def _unrealized(self) -> float:
+        return sum(
+            price_pnl(pos.side, pos.open_price, pos.last_price, pos.multiplier, pos.lots)
+            for pos in self._open.values()
+        )
+
+    def _equity_assuming(self, extra_unrealized: float) -> float:
+        return self.cash + self._unrealized() + extra_unrealized
+
+    def _save_cash(self, cur: Any) -> None:
+        cur.execute("UPDATE paper_account SET cash=%s WHERE id=1", (self.cash,))
+
+    def _load(self) -> None:
+        cur = self.conn.cursor(DictCursor)
+        try:
+            cur.execute("SELECT initial_cash, cash FROM paper_account WHERE id=1")
+            row = cur.fetchone()
+            if row is None:
+                cur.execute(
+                    "INSERT INTO paper_account (id, initial_cash, cash) VALUES (1, %s, %s)",
+                    (INITIAL_CASH, INITIAL_CASH),
+                )
+                self.conn.commit()
+                self.initial_cash = INITIAL_CASH
+                self.cash = INITIAL_CASH
+            else:
+                self.initial_cash = float(row["initial_cash"])
+                self.cash = float(row["cash"])
+            cur.execute(
+                """
+                SELECT id, symbol, name, duration_sec, duration, side, open_time, open_price,
+                       lots, multiplier, margin, fee_per_lot, fee_open, tp_price, sl_price, last_price
+                FROM paper_trade WHERE status='open' ORDER BY id
+                """
+            )
+            for item in cur.fetchall():
+                pos = OpenPosition(
+                    trade_id=int(item["id"]),
+                    symbol=str(item["symbol"]),
+                    name=str(item["name"]),
+                    duration_sec=int(item["duration_sec"]),
+                    duration=str(item["duration"]),
+                    side=str(item["side"]),
+                    open_time=_as_naive(item["open_time"]),
+                    open_price=float(item["open_price"]),
+                    lots=int(item["lots"]),
+                    multiplier=float(item["multiplier"]),
+                    margin=float(item["margin"]),
+                    fee_per_lot=float(item["fee_per_lot"]),
+                    fee_open=float(item["fee_open"]),
+                    tp_price=float(item["tp_price"]),
+                    sl_price=float(item["sl_price"]),
+                    last_price=float(item["last_price"]),
+                )
+                self._open[(pos.symbol, pos.duration_sec)] = pos
+        finally:
+            cur.close()
+        self._log(f"账户就绪 初始{self.initial_cash:.2f} 当前本金{self.cash:.2f} 持仓{len(self._open)}笔")
+
+    def _log(self, text: str) -> None:
+        line = f"[paper] {text}"
+        print(line, flush=True)
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            pass
+
+
+def ensure_schema(conn: Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute(CREATE_ACCOUNT_SQL)
+        cur.execute(CREATE_TRADE_SQL)
+    conn.commit()
+
+
+def account_snapshot(conn: Connection, limit: int = 100) -> dict[str, Any]:
+    ensure_schema(conn)
+    cur = conn.cursor(DictCursor)
+    try:
+        cur.execute("SELECT initial_cash, cash FROM paper_account WHERE id=1")
+        account = cur.fetchone()
+        if account is None:
+            cur.execute(
+                "INSERT INTO paper_account (id, initial_cash, cash) VALUES (1, %s, %s)",
+                (INITIAL_CASH, INITIAL_CASH),
+            )
+            conn.commit()
+            account = {"initial_cash": INITIAL_CASH, "cash": INITIAL_CASH}
+        cur.execute(
+            """
+            SELECT id, symbol, name, duration, side, kind, open_time, open_price, lots,
+                   margin_rate, margin, fee_open, swing, extreme, head, tp_price, sl_price,
+                   last_price, multiplier, equity_after_open, reason
+            FROM paper_trade WHERE status='open' ORDER BY id
+            """
+        )
+        positions = [_row(item) for item in cur.fetchall()]
+        cur.execute(
+            """
+            SELECT id, symbol, name, duration, side, kind, status,
+                   open_time, open_price, lots, fee_open, tp_price, sl_price,
+                   close_time, close_price, close_reason, fee_close,
+                   gross_pnl, net_pnl, equity_after_open, equity_after_close, reason
+            FROM paper_trade ORDER BY id DESC LIMIT %s
+            """,
+            (max(1, min(limit, 200)),),
+        )
+        trades = [_row(item) for item in cur.fetchall()]
+    finally:
+        cur.close()
+
+    unrealized = 0.0
+    margin_used = 0.0
+    for pos in positions:
+        sign = -1.0 if pos["side"] == "short" else 1.0
+        unrealized += (float(pos["last_price"]) - float(pos["open_price"])) * sign * float(pos["multiplier"]) * int(pos["lots"])
+        margin_used += float(pos["margin"])
+    cash = float(account["cash"])
+    equity = cash + unrealized
+    available = cash + min(0.0, unrealized) - margin_used
+    return {
+        "initial_cash": float(account["initial_cash"]),
+        "cash": money(cash),
+        "equity": money(equity),
+        "unrealized": money(unrealized),
+        "margin_used": money(margin_used),
+        "available": money(available),
+        "open_count": len(positions),
+        "positions": positions,
+        "trades": trades,
+    }
+
+
+def _row(item: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in item.items():
+        if isinstance(value, datetime):
+            out[key] = value.isoformat(sep=" ", timespec="seconds")
+        else:
+            out[key] = value
+    return out
+
+
+def _as_naive(value: datetime) -> datetime:
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.replace(tzinfo=None).replace(microsecond=0)
+    if isinstance(value, datetime):
+        return value.replace(microsecond=0)
+    return value

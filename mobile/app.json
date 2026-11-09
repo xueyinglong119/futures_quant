@@ -2,7 +2,7 @@
   "expo": {
     "name": "期货形态告警",
     "slug": "futures-quant-alerts",
-    "version": "1.0.9",
+    "version": "1.0.10",
     "newArchEnabled": false,
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -14,7 +14,7 @@
     },
     "android": {
       "package": "com.futuresquant.alerts",
-      "versionCode": 10,
+      "versionCode": 11,
       "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",

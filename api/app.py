@@ -20,6 +20,7 @@ from core.indicators import (
     latest_indicator_snapshot,
 )
 from core.kline_store import LABEL_TO_DURATION, connect, ensure_table, load_bars
+from core.paper_trade import account_snapshot
 from core.market_data import DEFAULT_KLINE_SECONDS, get_today_klines
 from core.push_notify import send_alert_push
 
@@ -200,6 +201,16 @@ def json_safe_records(df) -> list[dict[str, Any]]:
                 clean[k] = v
         rows.append(clean)
     return rows
+
+
+@app.get("/api/paper")
+def api_paper(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+    """模拟账户：本金、持仓、每笔开仓手续费和盈亏。"""
+    conn = connect()
+    try:
+        return account_snapshot(conn, limit=limit)
+    finally:
+        conn.close()
 
 
 @app.get("/api/alerts")

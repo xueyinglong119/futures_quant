@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -192,6 +192,7 @@ class HsMonitorEngine:
         self._strategies: dict[str, HeadShouldersStrategy] = {}
         self._last_bar_dt: dict[str, datetime] = {}
         self._alerted: set[str] = set()
+        self.on_signal: Callable[[str, int, datetime, pd.DataFrame, Any], None] | None = None
 
     def _key(self, symbol: str, duration_sec: int) -> str:
         return f"{symbol}|{duration_sec}"
@@ -277,4 +278,9 @@ class HsMonitorEngine:
             push=push,
             toast=toast,
         )
+        if self.on_signal is not None:
+            try:
+                self.on_signal(symbol, duration_sec, last_dt, df, signal)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[paper] 开仓处理失败 {symbol}: {exc}", flush=True)
         return 1
