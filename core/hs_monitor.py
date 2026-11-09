@@ -47,15 +47,14 @@ class HsTfConfig:
     lookback_bars: int
 
 
-# 不同周期用不同跨度，避免 1 分钟和日线共用同一 bar 数
+# 各周期形态左肩→右肩最长均为 110 根
 TF_CONFIGS: dict[int, HsTfConfig] = {
-    DURATION_1M: HsTfConfig(DURATION_1M, 8, 25, 240, 500),
-    # 5m 形态左肩→右肩最长 50 根
-    DURATION_5M: HsTfConfig(DURATION_5M, 6, 20, 50, 400),
-    DURATION_30M: HsTfConfig(DURATION_30M, 4, 10, 120, 300),
-    DURATION_1H: HsTfConfig(DURATION_1H, 3, 8, 80, 250),
-    DURATION_2H: HsTfConfig(DURATION_2H, 3, 6, 50, 200),
-    DURATION_1D: HsTfConfig(DURATION_1D, 2, 8, 100, 220),
+    DURATION_1M: HsTfConfig(DURATION_1M, 8, 25, 110, 500),
+    DURATION_5M: HsTfConfig(DURATION_5M, 6, 20, 110, 400),
+    DURATION_30M: HsTfConfig(DURATION_30M, 4, 10, 110, 300),
+    DURATION_1H: HsTfConfig(DURATION_1H, 3, 8, 110, 250),
+    DURATION_2H: HsTfConfig(DURATION_2H, 3, 6, 110, 200),
+    DURATION_1D: HsTfConfig(DURATION_1D, 2, 8, 110, 220),
 }
 
 

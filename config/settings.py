@@ -41,7 +41,7 @@ class HeadShouldersConfig:
     pivot_order: int = 4              # 拐点左右各 N 根 K 线（略增以减少假拐点）
     shoulder_tolerance: float = 0.03  # 左右肩对称容忍 3%
     min_span_bars: int = 10           # 形态最短 10 根 K 线（5 小时）
-    max_span_bars: int = 60           # 形态最长 60 根 K 线
+    max_span_bars: int = 110          # 形态最长 110 根 K 线（各周期统一）
     max_right_above_left_ratio: float = 0.015  # 右肩最多高于左肩 1.5%（相对头部）
     min_head_neck_ratio: float = 0.008         # 头-颈高度至少 0.8% 才交易
     stop_beyond_head_ratio: float = 0.005      # 止损：突破头部再 0.5%

@@ -163,7 +163,7 @@ def _make_strategy() -> HeadShouldersStrategy:
         pivot_order=8,
         shoulder_tolerance=0.03,
         min_span_bars=25,
-        max_span_bars=240,
+        max_span_bars=110,
         max_right_above_left_ratio=0.015,
         min_head_neck_ratio=0.008,
         max_volume=1,
