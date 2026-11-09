@@ -38,7 +38,7 @@ class HeadShouldersStrategy:
 
     头是区间里的极值。一边可以有两个肩，取其中能和另一边配成形态的那一对。
     颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的一半。
-    两肩都要明显离开颈线，收盘突破颈线才开仓。突破后的回抽不再重复开仓。
+    两肩都要明显离开颈线。右肩拐点确认（再走出 pivot_order 根）即告警/开仓，不必等破颈线。
     """
 
     def __init__(
@@ -293,7 +293,7 @@ class HeadShouldersStrategy:
             target_volume=-volume,
             action="sell",
             reason=(
-                f"头肩顶破颈线 左{price_l:.0f}({left_time}) 头{price_h:.0f}({head_time}) "
+                f"头肩顶右肩确认 左{price_l:.0f}({left_time}) 头{price_h:.0f}({head_time}) "
                 f"右{price_r:.0f}({right_time}) 颈{neck:.0f}"
             ),
             detail={
@@ -346,7 +346,7 @@ class HeadShouldersStrategy:
             target_volume=volume,
             action="buy",
             reason=(
-                f"头肩底破颈线 左{price_l:.0f}({left_time}) 头{price_h:.0f}({head_time}) "
+                f"头肩底右肩确认 左{price_l:.0f}({left_time}) 头{price_h:.0f}({head_time}) "
                 f"右{price_r:.0f}({right_time}) 颈{neck:.0f}"
             ),
             detail={
@@ -395,16 +395,13 @@ class HeadShouldersStrategy:
         bottom: bool,
         kind: str,
     ) -> tuple[int, float, int, float, int, float, float, str, int, int] | None:
-        """在本根收盘刚突破颈线的形态里，取头部最高的那一个。"""
+        """本根刚好确认右肩的形态里，取头部幅度最大的那一个（不必破颈线）。"""
         if len(pivots) < 3 or len(klines) < 2:
             return None
         closes = klines.close
         last_idx = len(closes) - 1
-        prev_close = float(closes.iloc[-2])
-        close = float(closes.iloc[-1])
         extreme = klines.low if bottom else klines.high
         best: tuple[float, tuple] | None = None
-        break_limit = max(self.max_span_bars // 2, self.pivot_order * 3)
 
         for hi, (idx_h, price_h) in enumerate(pivots):
             for li in range(hi):
@@ -426,9 +423,8 @@ class HeadShouldersStrategy:
                         break
                     if idx_r - idx_h < self.pivot_order:
                         continue
-                    if last_idx - idx_r > break_limit:
-                        continue
-                    if not self._right_shoulder_confirmed(idx_r, last_idx):
+                    # 仅在右肩「刚刚」确认的那一根告警，避免事后补推旧形态
+                    if last_idx != idx_r + self.pivot_order:
                         continue
                     if bottom and price_r <= price_h:
                         continue
@@ -466,19 +462,22 @@ class HeadShouldersStrategy:
                     height, _neck_head = shaped
                     n1, p1 = neck_l
                     n2, p2 = neck_r
-                    neck_prev = self._line_at(n1, p1, n2, p2, last_idx - 1)
                     neck_now = self._line_at(n1, p1, n2, p2, last_idx)
-                    crossed = (
-                        prev_close <= neck_prev and close > neck_now
-                        if bottom
-                        else prev_close >= neck_prev and close < neck_now
-                    )
-                    if not crossed:
-                        continue
                     if best is None or height > best[0]:
                         best = (
                             height,
-                            (idx_l, price_l, idx_h, price_h, idx_r, price_r, neck_now, pattern_id, n1, n2),
+                            (
+                                idx_l,
+                                price_l,
+                                idx_h,
+                                price_h,
+                                idx_r,
+                                price_r,
+                                neck_now,
+                                pattern_id,
+                                n1,
+                                n2,
+                            ),
                         )
 
         if best is None:
