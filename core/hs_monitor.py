@@ -220,11 +220,38 @@ class HsMonitorEngine:
         emit=False 时只预热状态（启动回扫历史用），不发告警。
         """
         df = load_tf_df(symbol, duration_sec, conn=conn)
-        if df.empty:
+        return self.evaluate_df(
+            symbol,
+            duration_sec,
+            df,
+            alert_log=alert_log,
+            push=push,
+            toast=toast,
+            force=force,
+            emit=emit,
+        )
+
+    def evaluate_df(
+        self,
+        symbol: str,
+        duration_sec: int,
+        df: pd.DataFrame,
+        *,
+        alert_log: Path | None = None,
+        push: bool = True,
+        toast: bool = False,
+        force: bool = False,
+        emit: bool = True,
+    ) -> int:
+        """用给定的已收盘 K 线做一次检测。最后一根没变则跳过。"""
+        if df is None or df.empty:
             return 0
 
         key = self._key(symbol, duration_sec)
         last_dt = pd.Timestamp(df.iloc[-1]["datetime"]).to_pydatetime()
+        if last_dt.tzinfo is not None:
+            last_dt = last_dt.replace(tzinfo=None)
+        last_dt = last_dt.replace(microsecond=0)
         prev = self._last_bar_dt.get(key)
         if not force and prev is not None and prev == last_dt:
             return 0
