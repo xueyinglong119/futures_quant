@@ -50,7 +50,8 @@ class HsTfConfig:
 # 不同周期用不同跨度，避免 1 分钟和日线共用同一 bar 数
 TF_CONFIGS: dict[int, HsTfConfig] = {
     DURATION_1M: HsTfConfig(DURATION_1M, 8, 25, 240, 500),
-    DURATION_5M: HsTfConfig(DURATION_5M, 6, 20, 120, 400),
+    # 5m 形态左肩→右肩最长 100 根（约跨周末的 2～3 个交易日）
+    DURATION_5M: HsTfConfig(DURATION_5M, 6, 20, 100, 400),
     DURATION_30M: HsTfConfig(DURATION_30M, 4, 10, 120, 300),
     DURATION_1H: HsTfConfig(DURATION_1H, 3, 8, 80, 250),
     DURATION_2H: HsTfConfig(DURATION_2H, 3, 6, 50, 200),
