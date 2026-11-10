@@ -212,6 +212,14 @@ def board_page() -> FileResponse:
     return FileResponse(page)
 
 
+@app.get("/alerts")
+def alerts_page() -> FileResponse:
+    page = WEB_DIR / "alerts.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="告警页不存在")
+    return FileResponse(page)
+
+
 @app.get("/api/paper")
 def api_paper(limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
     """模拟账户：本金、持仓、每笔开仓手续费和盈亏。"""

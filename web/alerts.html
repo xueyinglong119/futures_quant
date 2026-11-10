@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>期货形态告警 · PC</title>
+<style>
+  body { margin: 0; background: #0B1620; color: #D7E0E8; font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 14px; padding: 12px 20px; background: #0E1A24; border-bottom: 1px solid #24384A; }
+  header h1 { margin: 0; font-size: 18px; }
+  header .sub { color: #9BB0C1; font-size: 12px; }
+  button { background: #C46A2B; color: #fff; border: 0; border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer; }
+  button.ghost { background: #1B2C3B; color: #D7E0E8; }
+  label.auto { color: #9BB0C1; font-size: 12px; display: flex; align-items: center; gap: 5px; }
+  main { max-width: 860px; margin: 0 auto; padding: 16px 20px 60px; }
+  .card { background: #12202C; border: 1px solid #24384A; border-left: 4px solid #E8B86D; border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .card.unread { border-left-color: #FF6B6B; }
+  .title { font-size: 16px; font-weight: 600; }
+  .code { color: #9BB0C1; font-size: 12px; margin-top: 2px; }
+  .time { color: #9BB0C1; font-size: 12px; margin-top: 2px; }
+  .reason { margin-top: 8px; white-space: pre-wrap; }
+  img.chart { width: 100%; max-width: 780px; margin-top: 10px; border-radius: 8px; background: #0E1A24; display: block; }
+  .nochart { color: #9BB0C1; font-size: 12px; margin-top: 6px; }
+  .toggle { margin-top: 10px; }
+  .detail { margin-top: 8px; background: #0E1A24; border: 1px solid #24384A; border-radius: 8px; padding: 10px 12px; font-size: 13px; }
+  .detail .note { color: #9BB0C1; font-size: 12px; }
+  .detail .line { margin-top: 4px; }
+  .up { color: #FF6B6B; } .down { color: #3DDC97; }
+  .empty { color: #9BB0C1; text-align: center; padding: 40px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>期货形态告警</h1>
+  <span class="sub">头肩顶 / 头肩底 · 形态K线图 · 执行详情</span>
+  <span style="flex:1"></span>
+  <label class="auto"><input type="checkbox" id="auto" checked>30 秒自动刷新</label>
+  <button class="ghost" id="refresh">刷新</button>
+</header>
+<main id="list"><div class="empty">加载中…</div></main>
+<script>
+const list = document.getElementById("list");
+const openSet = new Set();
+const detailCache = new Map();
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+));
+const money = (v) => (v === null || v === undefined ? "—" : Number(v).toFixed(2));
+const pnlCls = (v) => (v === null || v === undefined || v === 0 ? "" : (v > 0 ? "up" : "down"));
+
+async function load() {
+  const resp = await fetch("/api/alerts?limit=100");
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const body = await resp.json();
+  const items = body.items || body.alerts || [];
+  if (!items.length) { list.innerHTML = '<div class="empty">暂无告警</div>'; return; }
+  list.innerHTML = "";
+  for (const item of items) list.appendChild(card(item));
+}
+
+function card(item) {
+  const extra = item.extra || {};
+  const el = document.createElement("div");
+  el.className = "card" + (item.read ? "" : " unread");
+  const name = extra.name || extra.display || item.symbol;
+  const dur = extra.duration ? ` · ${extra.duration}` : "";
+  el.innerHTML = `
+    <div class="title">${esc(name)}${esc(dur)} · ${esc(item.kind)}</div>
+    <div class="code">${esc(extra.code || item.symbol)}</div>
+    <div class="time">K线时间 ${esc(item.bar_time)}　发现时间 ${esc(item.created_at)}</div>
+    <div class="reason">${esc(item.reason)}</div>
+    <img class="chart" loading="lazy" src="/api/alerts/${encodeURIComponent(item.id)}/chart.png" alt="形态K线图">
+    <div class="nochart" hidden>该告警无可用形态图</div>
+    <div><button class="ghost toggle">查看执行详情 ▼</button></div>
+    <div class="detail" hidden></div>`;
+  const img = el.querySelector("img");
+  const nochart = el.querySelector(".nochart");
+  img.addEventListener("error", () => { img.style.display = "none"; nochart.hidden = false; });
+  const btn = el.querySelector(".toggle");
+  const box = el.querySelector(".detail");
+  btn.addEventListener("click", async () => {
+    if (!box.hidden) { box.hidden = true; btn.textContent = "查看执行详情 ▼"; return; }
+    box.hidden = false;
+    btn.textContent = "收起执行详情 ▲";
+    if (!detailCache.has(item.id)) {
+      box.innerHTML = '<div class="note">加载中…</div>';
+      try {
+        const resp = await fetch(`/api/alerts/${encodeURIComponent(item.id)}/execution`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        detailCache.set(item.id, await resp.json());
+      } catch (e) {
+        detailCache.set(item.id, { note: `执行详情加载失败：${e.message}`, trade: null });
+      }
+    }
+    box.innerHTML = renderDetail(detailCache.get(item.id));
+  });
+  if (openSet.has(item.id)) btn.click();
+  return el;
+}
+
+function renderDetail(d) {
+  const t = d.trade;
+  let html = `<div class="note">${esc(d.note)}</div>`;
+  if (!t) return html;
+  html += `<div class="line">${esc(t.open_time_bj)} ${esc(t.side_text)} ${t.open_price} × ${t.lots} 手　保证金 ${Number(t.margin).toFixed(0)}</div>`;
+  html += `<div class="line">止盈 ${t.tp_price}　止损 ${t.sl_price}　开仓手续费 ${Number(t.fee_open).toFixed(2)}</div>`;
+  if (t.status === "open") {
+    html += `<div class="line">现价 ${t.last_price ?? "—"}</div>`;
+    html += `<div class="line ${pnlCls(t.unrealized)}">浮动盈亏 ${money(t.unrealized)}</div>`;
+  } else {
+    html += `<div class="line">平仓 ${esc(t.close_time_bj || "—")}　${t.close_price ?? "—"}　${esc(t.close_reason || "")}</div>`;
+    html += `<div class="line ${pnlCls(t.net_pnl)}">净盈亏 ${money(t.net_pnl)}</div>`;
+  }
+  return html;
+}
+
+document.getElementById("refresh").addEventListener("click", () => {
+  detailCache.clear();
+  load().catch((e) => { list.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; });
+});
+setInterval(() => { if (document.getElementById("auto").checked) load().catch(() => {}); }, 30000);
+load().catch((e) => { list.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`; });
+</script>
+</body>
+</html>
