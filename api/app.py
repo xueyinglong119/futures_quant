@@ -8,11 +8,12 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from core.alert_store import add_alert, clear_alerts, list_alerts, mark_read, register_device
+from core.hs_chart import render_hs_chart
 from utils.symbols import get_display_name
 from core.indicators import (
     bars_from_records,
@@ -289,6 +290,31 @@ def api_alert_execution(alert_id: str) -> dict[str, Any]:
         return alert_execution(conn, alert_id.strip())
     finally:
         conn.close()
+
+
+@app.get("/api/alerts/{alert_id}/chart.png")
+def api_alert_chart(alert_id: str) -> Response:
+    """告警的头肩形态 K 线图：蜡烛 + 左/头/右标记 + 颈线。"""
+    alert = next((a for a in list_alerts(limit=1000) if a.get("id") == alert_id.strip()), None)
+    if alert is None:
+        raise HTTPException(404, "告警不存在")
+    extra = alert.get("extra") or {}
+    detail = extra.get("detail") or {}
+    duration_sec = extra.get("duration_sec")
+    if not detail or not duration_sec:
+        raise HTTPException(404, "该告警没有形态关键点")
+    conn = connect()
+    try:
+        png = render_hs_chart(alert["symbol"], int(duration_sec), alert["bar_time"], detail, conn)
+    finally:
+        conn.close()
+    if not png:
+        raise HTTPException(404, "没有可画的 K 线")
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
 @app.post("/api/alerts/clear")

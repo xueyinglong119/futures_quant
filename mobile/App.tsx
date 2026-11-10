@@ -4,6 +4,7 @@ import {
   Alert,
   AppState,
   FlatList,
+  Image,
   Platform,
   Pressable,
   SafeAreaView,
@@ -491,6 +492,13 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
       <Text style={styles.alertReason}>{item.reason}</Text>
       <Text style={styles.detailHint}>{open ? "收起执行详情 ▲" : "查看执行详情 ▼"}</Text>
       {open ? (
+        <Image
+          source={{ uri: `${base}/api/alerts/${encodeURIComponent(item.id)}/chart.png` }}
+          style={styles.chartImg}
+          resizeMode="contain"
+        />
+      ) : null}
+      {open ? (
         loading ? (
           <ActivityIndicator color="#E8B86D" style={{ marginTop: 8 }} />
         ) : error ? (
@@ -712,6 +720,13 @@ const styles = StyleSheet.create({
   alertTime: { color: "#9BB0C1", marginTop: 4, fontSize: 12 },
   alertReason: { color: "#D7E0E8", marginTop: 8, lineHeight: 20 },
   detailHint: { color: "#E8B86D", marginTop: 8, fontSize: 12, fontWeight: "600" },
+  chartImg: {
+    width: "100%",
+    height: 220,
+    marginTop: 8,
+    borderRadius: 8,
+    backgroundColor: "#0E1A24",
+  },
   detailBox: {
     marginTop: 8,
     paddingTop: 8,
