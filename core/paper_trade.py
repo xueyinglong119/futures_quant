@@ -6,6 +6,8 @@
 头肩底用「左肩与头之间的高峰 − 头」，这段高度的 0.8 为止盈距离，0.2 为止损距离。
 开仓价是确认那根已收盘 K 线的收盘价。同一品种同一周期同时只持有一笔。
 每笔最多 8 手，不把可用资金一次开满。看板按最新入库价刷新浮动盈亏，也可手动平仓。
+每笔另设金额止损：浮动亏损超过 MAX_LOSS_PER_TRADE 元即触价平仓；
+与止盈/形态止损同根触碰时按亏损更大的价格成交。
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ INITIAL_CASH = 50_000.0
 MARGIN_ADD = 0.01
 FEE_ADD = 0.01
 MAX_LOTS = 8
+MAX_LOSS_PER_TRADE = 1_000.0
 # 小于这个数时，交易所字段更像成交额费率，而不是每手元
 _RATIO_CEILING = 0.02
 
@@ -337,12 +340,33 @@ class PaperBroker:
         opened = float(bar["open"])
         close = float(bar["close"])
         hit = resolve_exit(pos.side, opened, high, low, pos.tp_price, pos.sl_price)
+        cap_hit = self._loss_cap_hit(pos, opened, high, low)
+        if hit is not None and cap_hit is not None:
+            if pos.side == "long":
+                hit = min(hit, cap_hit, key=lambda h: h[1])
+            else:
+                hit = max(hit, cap_hit, key=lambda h: h[1])
+        elif cap_hit is not None:
+            hit = cap_hit
         if hit is None:
             pos.last_price = close
             self._update_last_price(pos)
             return
         reason, exit_price = hit
         self._close_trade(pos, when, reason, exit_price)
+
+    def _loss_cap_hit(
+        self, pos: OpenPosition, opened: float, high: float, low: float
+    ) -> tuple[str, float] | None:
+        if pos.multiplier <= 0 or pos.lots <= 0:
+            return None
+        dist = MAX_LOSS_PER_TRADE / (pos.multiplier * pos.lots)
+        cap_price = pos.open_price - dist if pos.side == "long" else pos.open_price + dist
+        no_tp = math.inf if pos.side == "long" else -math.inf
+        hit = resolve_exit(pos.side, opened, high, low, no_tp, cap_price)
+        if hit is None:
+            return None
+        return f"止损(浮亏超{MAX_LOSS_PER_TRADE:.0f})", hit[1]
 
     def snapshot(self) -> dict[str, Any]:
         return account_snapshot(self.conn)
