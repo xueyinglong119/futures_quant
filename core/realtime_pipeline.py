@@ -32,10 +32,10 @@ from core.hs_monitor import (
     load_tf_df,
 )
 from core.kline_fetch import (
+    _is_ready,
     aggregate_monthly_from_daily,
     aggregate_quarterly_from_daily,
     aggregate_yearly_from_daily,
-    wait_klines_ready,
 )
 from core.paper_trade import PaperBroker
 from core.kline_store import (
@@ -57,17 +57,21 @@ from utils.trading_session import get_all_session_trigger_minutes
 
 TZ = ZoneInfo("Asia/Shanghai")
 
-# 各入库周期订阅长度（不含会话合成周期）。
-# 免费/试用账号一次订 80 品种时过长会卡住，长度取能覆盖头肩回看即可。
-TAIL_LENGTH: dict[int, int] = {
-    60: 800,        # 1m（头肩回看约 500）
-    180: 400,       # 3m
-    300: 400,       # 5m
-    600: 250,       # 10m
-    900: 200,       # 15m
-    86400: 40,      # 1d
-    604800: 30,     # 1w
+# 天勤直播序列只要短窗口：发现新收盘 K；头肩回看从 MySQL 加载，避免每次重启重拉几百根
+LIVE_TAIL_LENGTH: dict[int, int] = {
+    60: 60,         # 1m
+    180: 40,        # 3m
+    300: 40,        # 5m
+    600: 30,        # 10m
+    900: 30,        # 15m
+    86400: 5,       # 1d
+    604800: 4,      # 1w
 }
+# 非头肩周期内存裁剪用
+TAIL_LENGTH = LIVE_TAIL_LENGTH
+
+# 边订阅边监控：每批品种数
+SUBSCRIBE_BATCH = 8
 
 # 1m 走到这些北京时刻时，刷新会话 30m/1h/2h/3h/4h
 _SESSION_REFRESH_MINUTES = get_all_session_trigger_minutes()
@@ -263,65 +267,83 @@ class RealtimePipeline:
             ingest_labels = [DURATION_LABELS[d] for d in INGEST_DURATIONS]
             print(
                 f"[pipeline] 品种 {len(symbols)}，入库周期 {','.join(ingest_labels)} "
-                f"（月/季/年由日线聚合）",
+                f"（直播短窗口；回看用库；边订边监控；30m/1h/2h/3h/4h 由 1m 合成）",
                 flush=True,
             )
             serials: dict[tuple[str, int], pd.DataFrame] = {}
+            pending = list(symbols)
+            armed: set[tuple[str, int]] = set()
+            bootstrapped: set[str] = set()
             total = len(symbols)
-            for i, symbol in enumerate(symbols, 1):
-                for dur in INGEST_DURATIONS:
-                    length = TAIL_LENGTH.get(dur, 200)
-                    try:
-                        serials[(symbol, dur)] = api.get_kline_serial(
-                            symbol, dur, data_length=length
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        print(
-                            f"[pipeline] 订阅失败 {symbol} "
-                            f"{DURATION_LABELS.get(dur, dur)}: {exc}",
-                            flush=True,
-                        )
-                # 每订完一个品种泵一下行情，避免批量注册时连接假死
-                try:
-                    api.wait_update(deadline=time_monotonic_deadline(api, 0.5))
-                except Exception:
-                    pass
-                if i == 1 or i % 5 == 0 or i == total:
+            subscribed_n = 0
+
+            while in_trading_window(datetime.now(TZ)):
+                # —— 还有未订品种：先挂下一批短序列，再和已就绪品种一起监控 ——
+                if pending:
+                    batch = pending[:SUBSCRIBE_BATCH]
+                    del pending[:SUBSCRIBE_BATCH]
+                    for symbol in batch:
+                        for dur in INGEST_DURATIONS:
+                            length = LIVE_TAIL_LENGTH.get(dur, 30)
+                            try:
+                                serials[(symbol, dur)] = api.get_kline_serial(
+                                    symbol, dur, data_length=length
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                print(
+                                    f"[pipeline] 订阅失败 {symbol} "
+                                    f"{DURATION_LABELS.get(dur, dur)}: {exc}",
+                                    flush=True,
+                                )
+                        try:
+                            api.wait_update(
+                                deadline=time_monotonic_deadline(api, 0.15)
+                            )
+                        except Exception:
+                            pass
+                    subscribed_n += len(batch)
                     print(
-                        f"[pipeline] 订阅进度 {i}/{total} "
-                        f"序列 {len(serials)} 最近 {symbol}",
+                        f"[pipeline] 订阅进度 {subscribed_n}/{total} "
+                        f"序列 {len(serials)} 本批 {batch[0]}..{batch[-1]}",
                         flush=True,
                     )
-            print(
-                f"[pipeline] 已订阅 {len(serials)} 条序列"
-                f"（30m/1h/2h/3h/4h 由 1m 按交易时段合成），等待行情...",
-                flush=True,
-            )
-            # 大批序列就绪可能超过 5 分钟，按条数放宽
-            ready_timeout = min(900, max(300, len(serials) * 0.8))
-            print(
-                f"[pipeline] 等待 K 线就绪 timeout={ready_timeout:.0f}s ...",
-                flush=True,
-            )
-            ok = wait_klines_ready(
-                api, list(serials.values()), timeout_sec=ready_timeout
-            )
-            print(
-                f"[pipeline] K 线就绪={'是' if ok else '部分超时，继续用已到数据'}",
-                flush=True,
-            )
-            self._catch_up(conn, serials)
-            # 启动时用 1m 覆盖最近会话 30m/1h，清掉历史整点口径
-            self._bootstrap_session_bars(conn, symbols)
-            while in_trading_window(datetime.now(TZ)):
-                api.wait_update(deadline=time_monotonic_deadline(api, 5))
-                changed = [key for key, kl in serials.items() if api.is_changing(kl)]
-                if not changed:
+
+                deadline_sec = 1.0 if pending else 5.0
+                api.wait_update(deadline=time_monotonic_deadline(api, deadline_sec))
+
+                # 序列有数据后纳入监控（不必等全部 80 个订完）
+                newly: list[tuple[str, int]] = []
+                for key, kl in serials.items():
+                    if key in armed:
+                        continue
+                    if _is_ready(kl):
+                        armed.add(key)
+                        newly.append(key)
+                if newly:
+                    wrote = 0
+                    alerts = 0
+                    for symbol, dur in newly:
+                        n, a = self._ingest(conn, symbol, dur, serials[(symbol, dur)])
+                        wrote += n
+                        alerts += a
+                        if dur == DURATION_1M and symbol not in bootstrapped:
+                            self._bootstrap_one_symbol(conn, symbol)
+                            bootstrapped.add(symbol)
+                    print(
+                        f"[pipeline] 新就绪 {len(newly)} 序列，监控中 {len(armed)}，"
+                        f"待订品种 {len(pending)}，补齐入库 {wrote}，告警 {alerts}",
+                        flush=True,
+                    )
+
+                if not armed:
                     continue
                 wrote = 0
                 alerts = 0
-                for key in changed:
-                    n, a = self._ingest(conn, key[0], key[1], serials[key])
+                for key in list(armed):
+                    kl = serials.get(key)
+                    if kl is None or not api.is_changing(kl):
+                        continue
+                    n, a = self._ingest(conn, key[0], key[1], kl)
                     wrote += n
                     alerts += a
                 if wrote or alerts:
@@ -436,42 +458,47 @@ class RealtimePipeline:
             )
         return len(fresh), alerts
 
-    def _bootstrap_session_bars(self, conn, symbols: list[str]) -> None:
-        """启动补齐后，用 1m 重算各品种最近会话 30m/1h/2h/3h/4h。"""
-        totals = {k: 0 for k in ("30m", "1h", "2h", "3h", "4h")}
-        for symbol in symbols:
-            try:
-                stats = refresh_symbol_session_recent(
-                    conn, symbol, around=datetime.now(TZ).replace(tzinfo=None)
+    def _bootstrap_one_symbol(self, conn, symbol: str) -> None:
+        """某品种 1m 就绪后，用库内 1m 重算最近会话 30m/1h/2h/3h/4h。"""
+        try:
+            stats = refresh_symbol_session_recent(
+                conn, symbol, around=datetime.now(TZ).replace(tzinfo=None)
+            )
+            parts = [
+                f"{k}={int(stats.get(f'{k}_upserted') or 0)}"
+                for k in ("30m", "1h", "2h", "3h", "4h")
+                if int(stats.get(f"{k}_upserted") or 0)
+            ]
+            if parts:
+                print(
+                    f"[pipeline] {symbol} 会话K就绪 {' '.join(parts)}",
+                    flush=True,
                 )
-                for key in totals:
-                    totals[key] += int(stats.get(f"{key}_upserted") or 0)
-                # 刷新头肩检测窗口（若该周期在监控列表）
-                for dur in _SESSION_HS_DURS:
-                    frame = load_tf_df(symbol, dur, conn=conn)
-                    if frame is None or frame.empty:
-                        continue
-                    state = self._states.get((symbol, dur))
-                    if state is None:
-                        state = _SeriesState(clock="beijing")
-                        self._states[(symbol, dur)] = state
-                    state.frame = frame
-                    state.clock = "beijing"
-                    state.watermark = _as_naive(
-                        pd.Timestamp(frame.iloc[-1]["datetime"]).to_pydatetime()
-                    )
-                    state.last_payload = _frame_last_bar(frame)
-                    self.engine._last_bar_dt[
-                        self.engine._key(symbol, dur)
-                    ] = state.watermark
-            except Exception:
-                traceback.print_exc()
-                print(f"[pipeline] 会话K重建失败 {symbol}", flush=True)
-        print(
-            "[pipeline] 会话K启动重建 upsert "
-            + " ".join(f"{k}={v}" for k, v in totals.items()),
-            flush=True,
-        )
+            for dur in _SESSION_HS_DURS:
+                frame = load_tf_df(symbol, dur, conn=conn)
+                if frame is None or frame.empty:
+                    continue
+                state = self._states.get((symbol, dur))
+                if state is None:
+                    state = _SeriesState(clock="beijing")
+                    self._states[(symbol, dur)] = state
+                state.frame = frame
+                state.clock = "beijing"
+                state.watermark = _as_naive(
+                    pd.Timestamp(frame.iloc[-1]["datetime"]).to_pydatetime()
+                )
+                state.last_payload = _frame_last_bar(frame)
+                self.engine._last_bar_dt[
+                    self.engine._key(symbol, dur)
+                ] = state.watermark
+        except Exception:
+            traceback.print_exc()
+            print(f"[pipeline] 会话K重建失败 {symbol}", flush=True)
+
+    def _bootstrap_session_bars(self, conn, symbols: list[str]) -> None:
+        """兼容：批量会话重建。"""
+        for symbol in symbols:
+            self._bootstrap_one_symbol(conn, symbol)
 
     def _maybe_refresh_session_from_1m(
         self, conn, symbol: str, fresh_1m: list[dict]
