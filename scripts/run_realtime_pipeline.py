@@ -1,6 +1,7 @@
 """开盘实时链路入口。
 
 交易时段内：订阅全商品主力 K 线，收盘后写入 MySQL，立刻做头肩告警。
+时段正常结束后：校验入库准确性（差异则自动修复），再进入休市等待。
 休市时睡眠，不占用行情连接。进程退出后由容器循环拉起。
 """
 
@@ -15,7 +16,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from core.kline_audit import run_post_close_audit  # noqa: E402
 from core.realtime_pipeline import TZ, RealtimePipeline, in_trading_window  # noqa: E402
+
+
+def _run_close_audit() -> None:
+    """本时段正常结束后做入库校验；失败只记日志，不阻断休市轮询。"""
+    try:
+        run_post_close_audit(
+            fix=True,
+            report_dir=ROOT / "reports",
+        )
+    except Exception:
+        traceback.print_exc()
+        print("[audit] 收盘校验异常，已跳过", flush=True)
 
 
 def main() -> None:
@@ -35,6 +49,8 @@ def main() -> None:
             time.sleep(15)
         else:
             print("[pipeline] 本时段结束，断开行情", flush=True)
+            print("[pipeline] 开始收盘入库校验", flush=True)
+            _run_close_audit()
 
 
 if __name__ == "__main__":
