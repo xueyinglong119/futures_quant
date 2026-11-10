@@ -57,15 +57,16 @@ from utils.trading_session import get_all_session_trigger_minutes
 
 TZ = ZoneInfo("Asia/Shanghai")
 
-# 覆盖周五收盘到周一上午的缺口；各入库周期订阅长度（不含会话合成周期）
+# 各入库周期订阅长度（不含会话合成周期）。
+# 免费/试用账号一次订 80 品种时过长会卡住，长度取能覆盖头肩回看即可。
 TAIL_LENGTH: dict[int, int] = {
-    60: 2000,       # 1m
-    180: 1200,      # 3m
-    300: 800,       # 5m
-    600: 600,       # 10m
-    900: 500,       # 15m
-    86400: 80,      # 1d
-    604800: 60,     # 1w
+    60: 800,        # 1m（头肩回看约 500）
+    180: 400,       # 3m
+    300: 400,       # 5m
+    600: 250,       # 10m
+    900: 200,       # 15m
+    86400: 40,      # 1d
+    604800: 30,     # 1w
 }
 
 # 1m 走到这些北京时刻时，刷新会话 30m/1h/2h/3h/4h
@@ -266,7 +267,8 @@ class RealtimePipeline:
                 flush=True,
             )
             serials: dict[tuple[str, int], pd.DataFrame] = {}
-            for symbol in symbols:
+            total = len(symbols)
+            for i, symbol in enumerate(symbols, 1):
                 for dur in INGEST_DURATIONS:
                     length = TAIL_LENGTH.get(dur, 200)
                     try:
@@ -279,12 +281,35 @@ class RealtimePipeline:
                             f"{DURATION_LABELS.get(dur, dur)}: {exc}",
                             flush=True,
                         )
+                # 每订完一个品种泵一下行情，避免批量注册时连接假死
+                try:
+                    api.wait_update(deadline=time_monotonic_deadline(api, 0.5))
+                except Exception:
+                    pass
+                if i == 1 or i % 5 == 0 or i == total:
+                    print(
+                        f"[pipeline] 订阅进度 {i}/{total} "
+                        f"序列 {len(serials)} 最近 {symbol}",
+                        flush=True,
+                    )
             print(
                 f"[pipeline] 已订阅 {len(serials)} 条序列"
                 f"（30m/1h/2h/3h/4h 由 1m 按交易时段合成），等待行情...",
                 flush=True,
             )
-            wait_klines_ready(api, list(serials.values()), timeout_sec=300)
+            # 大批序列就绪可能超过 5 分钟，按条数放宽
+            ready_timeout = min(900, max(300, len(serials) * 0.8))
+            print(
+                f"[pipeline] 等待 K 线就绪 timeout={ready_timeout:.0f}s ...",
+                flush=True,
+            )
+            ok = wait_klines_ready(
+                api, list(serials.values()), timeout_sec=ready_timeout
+            )
+            print(
+                f"[pipeline] K 线就绪={'是' if ok else '部分超时，继续用已到数据'}",
+                flush=True,
+            )
             self._catch_up(conn, serials)
             # 启动时用 1m 覆盖最近会话 30m/1h，清掉历史整点口径
             self._bootstrap_session_bars(conn, symbols)
