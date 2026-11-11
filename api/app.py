@@ -244,6 +244,22 @@ def backtest_gap_killed_page() -> FileResponse:
     return FileResponse(page, media_type="text/html")
 
 
+@app.get("/backtest/pivot")
+def backtest_pivot_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_pivot" / "gallery_single.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="枢轴对比回测尚未生成（reports/backtest_pivot/gallery_single.html 不存在）")
+    return FileResponse(page, media_type="text/html")
+
+
+@app.get("/backtest/pivot/killed")
+def backtest_pivot_killed_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_pivot" / "gallery_killed.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="枢轴对比被滤画廊尚未生成（reports/backtest_pivot/gallery_killed.html 不存在）")
+    return FileResponse(page, media_type="text/html")
+
+
 @app.get("/alerts")
 def alerts_page() -> FileResponse:
     page = WEB_DIR / "alerts.html"

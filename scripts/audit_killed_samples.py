@@ -23,9 +23,13 @@ def replay_detail(
     strict: bool,
     *,
     allow_session_gap: bool = False,
+    pivot_order: int | None = None,
 ):
     strat = make_strategy(duration_sec)
     strat.strict_shape = strict
+    if pivot_order is not None:
+        # 只用于回测对比：缩短拐点左右确认根数
+        strat.pivot_order = pivot_order
     if allow_session_gap:
         # 只用于回测对比：允许 1m/5m 形态跨 15:00→21:00 这类收盘断点
         strat.max_bar_gap_minutes = float("inf")

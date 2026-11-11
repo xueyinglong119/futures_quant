@@ -62,8 +62,8 @@ def _render(symbol: str, tf: int, sigs: list[dict], tdir: Path, prefix: str, con
     return meta
 
 
-def _job(job: tuple[str, int, int, str, bool]) -> dict:
-    symbol, tf, days, outdir, allow_gap = job
+def _job(job: tuple[str, int, int, str, bool, int]) -> dict:
+    symbol, tf, days, outdir, allow_gap, pivot_order = job
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     label = DURATION_LABELS.get(tf, str(tf))
     conn = connect()
@@ -76,11 +76,22 @@ def _job(job: tuple[str, int, int, str, bool]) -> dict:
                 "tf": tf, "symbol": symbol, "loose": 0,
                 "meta": [], "kmeta": [], "rows": [],
             }
-        loose = [s for s in replay_detail(symbol, tf, bars, False) if s["when"] >= cutoff]
+        loose = [
+            s
+            for s in replay_detail(
+                symbol, tf, bars, False, pivot_order=pivot_order or None
+            )
+            if s["when"] >= cutoff
+        ]
         hits = [
             s
             for s in replay_detail(
-                symbol, tf, bars, True, allow_session_gap=allow_gap
+                symbol,
+                tf,
+                bars,
+                True,
+                allow_session_gap=allow_gap,
+                pivot_order=pivot_order or None,
             )
             if s["when"] >= cutoff
         ]
@@ -125,27 +136,55 @@ def main() -> None:
         action="store_true",
         help="回测对比用：放开 1m/5m 形态跨收盘断点（实盘口径不变）",
     )
+    ap.add_argument(
+        "--pivot-override",
+        type=str,
+        default="",
+        help="回测对比用：如 300:1 表示 5m 拐点只要求左右各 1 根（实盘口径不变）",
+    )
     ap.add_argument("--outdir", type=str, default="")
     args = ap.parse_args()
 
     tfs = [int(x) for x in args.tfs.split(",") if x.strip()]
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    pivots: dict[int, int] = {}
+    for part in args.pivot_override.split(","):
+        if not part.strip():
+            continue
+        sec_s, order_s = part.split(":")
+        sec, order = int(sec_s), int(order_s)
+        if order < 1:
+            ap.error("--pivot-override 的确认根数必须 ≥1")
+        pivots[sec] = order
     outdir = Path(
         args.outdir
-        or (ROOT / "reports" / ("backtest_gap" if args.allow_session_gap else "backtest"))
+        or (
+            ROOT
+            / "reports"
+            / (
+                "backtest_pivot"
+                if pivots
+                else ("backtest_gap" if args.allow_session_gap else "backtest")
+            )
+        )
     )
     shutil.rmtree(outdir, ignore_errors=True)
     outdir.mkdir(parents=True, exist_ok=True)
 
     jobs = [
-        (s, tf, args.days, str(outdir), args.allow_session_gap)
+        (s, tf, args.days, str(outdir), args.allow_session_gap, pivots.get(tf, 0))
         for tf in tfs
         for s in symbols
     ]
+    piv_desc = (
+        ",".join(f"{DURATION_LABELS.get(k, k)}={v}" for k, v in pivots.items())
+        or "按实盘"
+    )
     print(
         f"[backtest] 品种 {len(symbols)} × 周期 {tfs} × {args.days} 天，"
         f"workers={args.workers}，作业 {len(jobs)}，"
-        f"跨断点={'放开(仅回测)' if args.allow_session_gap else '按实盘'}",
+        f"跨断点={'放开(仅回测)' if args.allow_session_gap else '按实盘'}，"
+        f"枢轴={piv_desc}{'(仅回测)' if pivots else ''}",
         flush=True,
     )
 
@@ -170,6 +209,7 @@ def main() -> None:
         "symbols": symbols,
         "tfs": tfs,
         "allow_session_gap": args.allow_session_gap,
+        "pivot_overrides": {DURATION_LABELS.get(k, str(k)): v for k, v in pivots.items()},
         "by_tf": {},
     }
     dirs = []
@@ -228,8 +268,17 @@ def main() -> None:
     )
 
     labels = "/".join(DURATION_LABELS.get(tf, str(tf)) for tf in tfs)
-    base = "/backtest/gap" if args.allow_session_gap else "/backtest"
-    tag = "v4 标定 · 放开跨断点(仅回测)" if args.allow_session_gap else "v4 标定"
+    base = (
+        "/backtest/pivot"
+        if pivots
+        else ("/backtest/gap" if args.allow_session_gap else "/backtest")
+    )
+    mods = []
+    if pivots:
+        mods.append(f"枢轴{piv_desc}")
+    if args.allow_session_gap:
+        mods.append("放开跨断点")
+    tag = "v4 标定" + (f" · {' / '.join(mods)}(仅回测)" if mods else "")
     subtitle = (
         f"{len(symbols)} 品种 × {args.days} 天 × {labels} · {tag} · "
         f"严格 {total_strict} / 改前 {total_loose} · 胜率 {wr} · 期望(以 swing 计) {ex_} · "
