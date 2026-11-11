@@ -280,10 +280,15 @@ class RealtimePipeline:
             pending = list(symbols)
             armed: set[tuple[str, int]] = set()
             bootstrapped: set[str] = set()
+            bootstrap_queue: list[str] = []
             total = len(symbols)
             subscribed_n = 0
+            subscribe_done_logged = False
 
             while in_trading_window(datetime.now(TZ)):
+                # 订阅未完成时不做会话重建，避免 会话合成 堵住后续 get_kline_serial
+                defer_session = bool(pending)
+
                 # —— 还有未订品种：先挂下一批短序列，再和已就绪品种一起监控 ——
                 if pending:
                     batch = pending[:SUBSCRIBE_BATCH]
@@ -330,12 +335,22 @@ class RealtimePipeline:
                     wrote = 0
                     alerts = 0
                     for symbol, dur in newly:
-                        n, a = self._ingest(conn, symbol, dur, serials[(symbol, dur)])
+                        n, a = self._ingest(
+                            conn,
+                            symbol,
+                            dur,
+                            serials[(symbol, dur)],
+                            session_refresh=not defer_session,
+                        )
                         wrote += n
                         alerts += a
-                        if dur == DURATION_1M and symbol not in bootstrapped:
-                            self._bootstrap_one_symbol(conn, symbol)
-                            bootstrapped.add(symbol)
+                        if (
+                            dur == DURATION_1M
+                            and symbol not in bootstrapped
+                            and symbol not in bootstrap_queue
+                        ):
+                            # 订齐前只排队，避免每个品种立刻重算 30m~4h
+                            bootstrap_queue.append(symbol)
                     print(
                         f"[pipeline] 新就绪 {len(newly)} 序列，监控中 {len(armed)}，"
                         f"待订品种 {len(pending)}，补齐入库 {wrote}，告警 {alerts}",
@@ -350,7 +365,13 @@ class RealtimePipeline:
                     kl = serials.get(key)
                     if kl is None or not api.is_changing(kl):
                         continue
-                    n, a = self._ingest(conn, key[0], key[1], kl)
+                    n, a = self._ingest(
+                        conn,
+                        key[0],
+                        key[1],
+                        kl,
+                        session_refresh=not defer_session,
+                    )
                     wrote += n
                     alerts += a
                 if wrote or alerts:
@@ -358,6 +379,21 @@ class RealtimePipeline:
                         f"[pipeline] 入库 {wrote} 根，新告警 {alerts}",
                         flush=True,
                     )
+
+                # 全部订阅挂上后，再分批做会话 K 启动补齐（每圈少量，不堵行情）
+                if not pending and bootstrap_queue:
+                    if not subscribe_done_logged:
+                        print(
+                            f"[pipeline] 订阅已挂满 {total}，开始分批会话K补齐 "
+                            f"队列 {len(bootstrap_queue)}",
+                            flush=True,
+                        )
+                        subscribe_done_logged = True
+                    chunk = bootstrap_queue[:4]
+                    del bootstrap_queue[:4]
+                    for symbol in chunk:
+                        self._bootstrap_one_symbol(conn, symbol)
+                        bootstrapped.add(symbol)
         finally:
             conn.close()
             api.close()
@@ -371,7 +407,15 @@ class RealtimePipeline:
             alerts += a
         print(f"[pipeline] 启动补齐 入库 {wrote} 根，新告警 {alerts}", flush=True)
 
-    def _ingest(self, conn, symbol: str, duration_sec: int, klines: pd.DataFrame) -> tuple[int, int]:
+    def _ingest(
+        self,
+        conn,
+        symbol: str,
+        duration_sec: int,
+        klines: pd.DataFrame,
+        *,
+        session_refresh: bool = True,
+    ) -> tuple[int, int]:
         # 保留亚秒，配合 0.5s 收盘宽限；勿截成整秒否则宽限失效
         now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         closed = serial_to_rows(klines, duration_sec, now_utc)
@@ -457,7 +501,7 @@ class RealtimePipeline:
         )
         if any(not r.get("correction") for r in fresh) and duration_sec == DURATION_1D:
             _refresh_htf_from_daily(conn, symbol)
-        if duration_sec == DURATION_1M:
+        if session_refresh and duration_sec == DURATION_1M:
             self._maybe_refresh_session_from_1m(conn, symbol, fresh)
         label = DURATION_LABELS.get(duration_sec, str(duration_sec))
         if alerts:
