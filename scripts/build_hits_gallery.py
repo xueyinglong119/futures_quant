@@ -8,6 +8,15 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from utils.symbols import get_display_name  # noqa: E402
+
+
+def _label(symbol: str) -> str:
+    name = get_display_name(symbol)
+    return f"{symbol}（{name}）" if name and name != symbol else symbol
 
 
 def build_gallery(
@@ -36,7 +45,7 @@ def build_gallery(
 
     cards = "\n".join(
         f'<figure><img src="{_src(m)}" loading="lazy">'
-        f'<figcaption>{m["symbol"]} · {m["when"]}<br>{m["reason"]}</figcaption></figure>'
+        f'<figcaption>{_label(m["symbol"])} · {m["when"]}<br>{m["reason"]}</figcaption></figure>'
         for m in meta
     )
     sub = f'<p class="sub">{subtitle}</p>' if subtitle else ""
