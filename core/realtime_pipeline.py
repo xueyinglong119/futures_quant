@@ -253,10 +253,18 @@ class _SeriesState:
 
 
 class RealtimePipeline:
-    def __init__(self, settings: Settings | None = None, alert_log: Path | None = None):
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        alert_log: Path | None = None,
+        *,
+        enable_monitor: bool = False,
+    ):
         self.settings = settings or load_settings()
         self.alert_log = alert_log
-        self.engine = HsMonitorEngine()
+        # False=只订行情写库（独立 ingest 服务）；True=同进程告警（旧一体模式）
+        self.enable_monitor = enable_monitor
+        self.engine = HsMonitorEngine() if enable_monitor else None
         self.broker: PaperBroker | None = None
         self._states: dict[tuple[str, int], _SeriesState] = {}
 
@@ -266,15 +274,19 @@ class RealtimePipeline:
         api = TqApi(auth=TqAuth(cfg.auth.user, cfg.auth.password))
         conn = connect()
         ensure_table(conn)
-        self.engine.on_signal = None
-        try:
-            self.broker = PaperBroker(conn, api)
-            self.engine.on_signal = self.broker.on_signal
-        except Exception:
-            traceback.print_exc()
-            print("[paper] 模拟账户初始化失败，本时段只告警不开仓", flush=True)
-            self.broker = None
+        if self.enable_monitor and self.engine is not None:
             self.engine.on_signal = None
+            try:
+                self.broker = PaperBroker(conn, api)
+                self.engine.on_signal = self.broker.on_signal
+            except Exception:
+                traceback.print_exc()
+                print("[paper] 模拟账户初始化失败，本时段只告警不开仓", flush=True)
+                self.broker = None
+                self.engine.on_signal = None
+        else:
+            self.broker = None
+            print("[pipeline] ingest 模式：只写库，告警由 monitor 服务负责", flush=True)
         try:
             symbols = list_commodity_mains(api)
             primary_labels = [DURATION_LABELS[d] for d in PRIMARY_LIVE_DURATIONS]
@@ -522,13 +534,13 @@ class RealtimePipeline:
             return 0, 0
         fresh.sort(key=lambda r: r["stored"])
         alerts = 0
-        do_hs = duration_sec in HS_MONITOR_DURATIONS
+        do_hs = self.enable_monitor and duration_sec in HS_MONITOR_DURATIONS
         lookback = (
             TF_CONFIGS[duration_sec].lookback_bars
             if do_hs
             else TAIL_LENGTH.get(duration_sec, 200)
         )
-        # 先更新内存窗口并告警，再写库——缩短「K线时间 → 发现时间」
+        # enable_monitor 时：先更新内存窗口并告警，再写库
         for row in fresh:
             correction = bool(row.get("correction"))
             if do_hs:
@@ -542,10 +554,7 @@ class RealtimePipeline:
                 "volume": row["volume"],
                 "open_oi": row["open_oi"],
             }
-            # 修正半截 K：只更新检测窗口，不重复模拟成交/告警
-            if correction:
-                continue
-            if not do_hs:
+            if correction or not do_hs or self.engine is None:
                 continue
             if self.broker is not None:
                 try:
@@ -606,6 +615,8 @@ class RealtimePipeline:
                     f"[pipeline] {symbol} 会话K就绪 {' '.join(parts)}",
                     flush=True,
                 )
+            if not self.enable_monitor or self.engine is None:
+                return
             for dur in _SESSION_HS_DURS:
                 frame = load_tf_df(symbol, dur, conn=conn)
                 if frame is None or frame.empty:
@@ -667,11 +678,14 @@ class RealtimePipeline:
                 f"[pipeline] {symbol} 会话合成 {' '.join(parts)} @ {pivot:%H:%M}",
                 flush=True,
             )
-        for dur in _SESSION_HS_DURS:
-            self._evaluate_session_tf(conn, symbol, dur)
+        if self.enable_monitor:
+            for dur in _SESSION_HS_DURS:
+                self._evaluate_session_tf(conn, symbol, dur)
 
     def _evaluate_session_tf(self, conn, symbol: str, duration_sec: int) -> int:
         """会话 K 写入后，刷新检测窗口并评估最新一根。"""
+        if not self.enable_monitor or self.engine is None:
+            return 0
         frame = load_tf_df(symbol, duration_sec, conn=conn)
         if frame is None or frame.empty:
             return 0
@@ -718,7 +732,11 @@ class RealtimePipeline:
         frame = pd.DataFrame()
         watermark = None
         last_payload = None
-        if duration_sec in HS_MONITOR_DURATIONS:
+        if (
+            self.enable_monitor
+            and self.engine is not None
+            and duration_sec in HS_MONITOR_DURATIONS
+        ):
             frame = load_tf_df(symbol, duration_sec, conn=conn)
             if frame is not None and not frame.empty:
                 watermark = _as_naive(

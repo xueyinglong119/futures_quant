@@ -52,7 +52,13 @@ chmod +x deploy/install_docker.sh deploy/docker-entrypoint.sh
 sudo bash deploy/install_docker.sh
 ```
 
-容器里同时跑两件事：8000 端口的 HTTP 接口，以及**全商品主力多周期头肩盯盘**（1m/5m/30m/1h/2h/日线，读 MySQL）。告警写在数据卷 `data/alerts.json`，手机 App 把服务器地址改成 `http://ECS公网IP:8000`。
+Compose 拆成三个容器（同一镜像）：
+
+- `futures-api`：HTTP / App 接口（8000）
+- `futures-ingest`：订行情写 MySQL + 会话合成 + 收盘校验（`reports/ingest.log`）
+- `futures-monitor`：读库水位做头肩告警 / 模拟盘（`reports/monitor.log`）
+
+改策略只重启 `futures-monitor` 即可，不必重订行情。告警在 `data/alerts.json`，App 地址：`http://ECS公网IP:8000`。
 
 本机试跑监控：
 

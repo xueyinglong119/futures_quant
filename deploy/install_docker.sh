@@ -39,4 +39,6 @@ docker compose up -d --build
 docker compose ps
 echo
 echo "完成。访问: http://服务器公网IP:8000/"
+echo "服务: futures-api / futures-ingest / futures-monitor"
 echo "日志: docker compose logs -f"
+echo "      tail -f reports/ingest.log reports/monitor.log"

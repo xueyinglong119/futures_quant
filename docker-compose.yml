@@ -13,3 +13,51 @@ services:
     volumes:
       - ./reports:/app/reports
       - ./data:/app/data
+
+  futures-ingest:
+    image: futures-quant-api:latest
+    container_name: futures-quant-ingest
+    restart: unless-stopped
+    depends_on:
+      - futures-api
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./reports:/app/reports
+      - ./data:/app/data
+    command:
+      [
+        "sh",
+        "-c",
+        "python -u scripts/run_ingest_pipeline.py >> /app/reports/ingest.log 2>&1",
+      ]
+    logging:
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  futures-monitor:
+    image: futures-quant-api:latest
+    container_name: futures-quant-monitor
+    restart: unless-stopped
+    depends_on:
+      - futures-api
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./reports:/app/reports
+      - ./data:/app/data
+    command:
+      [
+        "sh",
+        "-c",
+        "python -u scripts/run_monitor_service.py >> /app/reports/monitor.log 2>&1",
+      ]
+    logging:
+      options:
+        max-size: "20m"
+        max-file: "3"

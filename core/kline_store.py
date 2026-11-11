@@ -288,3 +288,36 @@ def max_datetime_end(
         cur.execute(sql, (symbol, duration_sec))
         row = cur.fetchone()
     return row[0] if row and row[0] else None
+
+
+def load_watermarks(
+    conn: Connection,
+    durations: Iterable[int],
+    symbols: Iterable[str] | None = None,
+) -> dict[tuple[str, int], datetime]:
+    """批量取各品种各周期最新 datetime_end，供监控服务水位轮询。"""
+    durs = [int(d) for d in durations]
+    if not durs:
+        return {}
+    placeholders = ",".join(["%s"] * len(durs))
+    params: list[Any] = list(durs)
+    sql = (
+        f"SELECT symbol, duration_sec, MAX(datetime_end) FROM `{TABLE_NAME}` "
+        f"WHERE duration_sec IN ({placeholders})"
+    )
+    if symbols is not None:
+        syms = [s for s in symbols if s]
+        if not syms:
+            return {}
+        sym_ph = ",".join(["%s"] * len(syms))
+        sql += f" AND symbol IN ({sym_ph})"
+        params.extend(syms)
+    sql += " GROUP BY symbol, duration_sec"
+    out: dict[tuple[str, int], datetime] = {}
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        for symbol, duration_sec, dt_end in cur.fetchall():
+            if dt_end is None:
+                continue
+            out[(str(symbol), int(duration_sec))] = dt_end
+    return out

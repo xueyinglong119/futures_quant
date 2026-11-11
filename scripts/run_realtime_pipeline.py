@@ -1,12 +1,12 @@
-"""开盘实时链路入口。
+"""兼容入口：默认走「只入库」模式。
 
-交易时段内：订阅全商品主力 K 线，收盘后写入 MySQL，立刻做头肩告警。
-时段正常结束后：校验入库准确性（差异则自动修复），再进入休市等待。
-休市时睡眠，不占用行情连接。进程退出后由容器循环拉起。
+告警请用 scripts/run_monitor_service.py（compose 服务 futures-monitor）。
+一体模式：加 --with-monitor。
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 import traceback
@@ -21,18 +21,21 @@ from core.realtime_pipeline import TZ, RealtimePipeline, in_trading_window  # no
 
 
 def _run_close_audit() -> None:
-    """本时段正常结束后做入库校验；失败只记日志，不阻断休市轮询。"""
     try:
-        run_post_close_audit(
-            fix=True,
-            report_dir=ROOT / "reports",
-        )
+        run_post_close_audit(fix=True, report_dir=ROOT / "reports")
     except Exception:
         traceback.print_exc()
         print("[audit] 收盘校验异常，已跳过", flush=True)
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="实时入库（可选同进程告警）")
+    parser.add_argument(
+        "--with-monitor",
+        action="store_true",
+        help="同进程跑头肩告警（默认关闭，由独立 monitor 服务负责）",
+    )
+    args = parser.parse_args()
     alert_log = ROOT / "reports" / "all_mains_hs_alerts.txt"
     while True:
         now = datetime.now(TZ)
@@ -42,7 +45,10 @@ def main() -> None:
             continue
         print(f"[pipeline] 进入交易时段 {now:%Y-%m-%d %H:%M:%S}", flush=True)
         try:
-            RealtimePipeline(alert_log=alert_log).run_session()
+            RealtimePipeline(
+                alert_log=alert_log if args.with_monitor else None,
+                enable_monitor=args.with_monitor,
+            ).run_session()
         except Exception:
             traceback.print_exc()
             print("[pipeline] 异常，15 秒后重连", flush=True)
