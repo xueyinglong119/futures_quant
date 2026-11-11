@@ -66,3 +66,31 @@ services:
       options:
         max-size: "20m"
         max-file: "3"
+
+  futures-backtest:
+    image: futures-quant-api:latest
+    container_name: futures-quant-backtest
+    # 一次性回测任务：跑完即退出，不常驻；部署/up 时重跑
+    restart: "no"
+    depends_on:
+      - futures-api
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Shanghai
+      - BACKTEST_WORKERS=2
+    volumes:
+      - ./reports:/app/reports
+      - ./data:/app/data
+    healthcheck:
+      disable: true
+    command:
+      [
+        "sh",
+        "-c",
+        "python -u scripts/run_backtest.py >> /app/reports/backtest.log 2>&1",
+      ]
+    logging:
+      options:
+        max-size: "20m"
+        max-file: "3"

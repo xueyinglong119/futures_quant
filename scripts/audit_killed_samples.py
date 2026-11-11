@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -61,6 +62,7 @@ def main() -> None:
     conn = connect()
     cutoff = datetime.now() - timedelta(days=args.days)
     rendered = 0
+    meta: list[dict] = []
     for symbol in [s.strip() for s in args.symbols.split(",") if s.strip()]:
         bars = load_bars(conn, symbol, args.tf, start=cutoff)
         if len(bars) < 120:
@@ -80,9 +82,13 @@ def main() -> None:
             rendered += 1
             path = outdir / f"killed_{rendered:02d}_{symbol.replace('@', '_').replace('.', '')}.png"
             path.write_bytes(png)
+            meta.append({"file": path.name, "symbol": symbol, "when": s["when"], "reason": s["reason"]})
             print(f"    {path.name}  {s['when']}  {s['reason']}", flush=True)
         if rendered >= args.max:
             break
+    (outdir / "meta_killed.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
     conn.close()
 
 

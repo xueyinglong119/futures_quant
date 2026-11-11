@@ -23,18 +23,7 @@ def _job(j: tuple[str, int, int]) -> list[dict]:
     return _outcome(*j)
 
 
-def _outcome(symbol: str, tf: int, days: int) -> list[dict]:
-    conn = connect()
-    try:
-        bars = load_bars(conn, symbol, tf, start=datetime.now() - timedelta(days=days))
-    finally:
-        conn.close()
-    if len(bars) < 120:
-        return []
-    from core.hs_monitor import bars_to_strategy_df
-
-    df = bars_to_strategy_df(bars)
-    sigs = replay_detail(symbol, tf, bars, True)
+def simulate_outcomes(symbol: str, tf: int, df, sigs: list[dict]) -> list[dict]:
     when_to_i = {str(df.iloc[i]["datetime"]): i for i in range(len(df))}
     out = []
     for s in sigs:
@@ -87,6 +76,21 @@ def _outcome(symbol: str, tf: int, days: int) -> list[dict]:
                     break
         out.append({"symbol": symbol, "tf": tf, "when": s["when"], "result": result})
     return out
+
+
+def _outcome(symbol: str, tf: int, days: int) -> list[dict]:
+    conn = connect()
+    try:
+        bars = load_bars(conn, symbol, tf, start=datetime.now() - timedelta(days=days))
+    finally:
+        conn.close()
+    if len(bars) < 120:
+        return []
+    from core.hs_monitor import bars_to_strategy_df
+
+    df = bars_to_strategy_df(bars)
+    sigs = replay_detail(symbol, tf, bars, True)
+    return simulate_outcomes(symbol, tf, df, sigs)
 
 
 def main() -> None:

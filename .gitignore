@@ -8,6 +8,7 @@ reports/*.csv
 reports/*.html
 reports/*.txt
 reports/*.json
+reports/backtest/
 data/*.csv
 data/*.db
 data/alerts.json

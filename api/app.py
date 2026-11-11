@@ -212,6 +212,14 @@ def board_page() -> FileResponse:
     return FileResponse(page)
 
 
+@app.get("/backtest")
+def backtest_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest" / "gallery_single.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="回测尚未生成（reports/backtest/gallery_single.html 不存在）")
+    return FileResponse(page, media_type="text/html")
+
+
 @app.get("/alerts")
 def alerts_page() -> FileResponse:
     page = WEB_DIR / "alerts.html"
