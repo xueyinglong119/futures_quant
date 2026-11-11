@@ -1,7 +1,7 @@
 """容器化回测一次性任务：回归计数 + 胜率 + 命中图画廊。
 
-默认范围：10 常用品种 × 近 15 天信号 × 非 1m 监控周期（5m/30m/1h/2h/1d）。
-长周期加载更长历史预热（形态跨周），只统计近 15 天触发，与实盘口径一致。
+默认范围：10 常用品种 × 近 60 天信号 × 全部监控周期（1m/5m/30m/1h/2h/1d）。
+长周期加载更长历史预热（形态跨周），只统计近 60 天触发，与实盘口径一致。
 跑完即退出（compose restart: "no"），部署/up 时重跑；BACKTEST_WORKERS 限并发。
 结果写 reports/backtest/，浏览器经 API /backtest 看画廊。
 """
@@ -41,9 +41,9 @@ DEFAULT_SYMBOLS = [
     "KQ.m@CZCE.AP",
     "KQ.m@DCE.bb",
 ]
-DEFAULT_TFS = [300, 1800, 3600, 7200, 86400]
+DEFAULT_TFS = [60, 300, 1800, 3600, 7200, 86400]
 # 长周期形态跨周，需更长历史预热（与实盘加载满窗口一致），信号仍只统计近 days 天
-LOAD_DAYS = {3600: 60, 7200: 120, 86400: 220}
+LOAD_DAYS = {60: 60, 300: 60, 1800: 90, 3600: 120, 7200: 150, 86400: 300}
 
 
 def _job(job: tuple[str, int, int, str]) -> dict:
@@ -93,7 +93,7 @@ def _stats(rows: list[dict]) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--days", type=int, default=15)
+    ap.add_argument("--days", type=int, default=60)
     ap.add_argument(
         "--workers", type=int, default=int(os.environ.get("BACKTEST_WORKERS", "2"))
     )
