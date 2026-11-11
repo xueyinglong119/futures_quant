@@ -27,6 +27,9 @@ services:
     volumes:
       - ./reports:/app/reports
       - ./data:/app/data
+    # 不跑 HTTP，去掉镜像自带的 :8000 healthcheck，避免一直 unhealthy
+    healthcheck:
+      disable: true
     command:
       [
         "sh",
@@ -51,6 +54,8 @@ services:
     volumes:
       - ./reports:/app/reports
       - ./data:/app/data
+    healthcheck:
+      disable: true
     command:
       [
         "sh",
