@@ -62,8 +62,8 @@ def _render(symbol: str, tf: int, sigs: list[dict], tdir: Path, prefix: str, con
     return meta
 
 
-def _job(job: tuple[str, int, int, str]) -> dict:
-    symbol, tf, days, outdir = job
+def _job(job: tuple[str, int, int, str, bool]) -> dict:
+    symbol, tf, days, outdir, allow_gap = job
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     label = DURATION_LABELS.get(tf, str(tf))
     conn = connect()
@@ -77,7 +77,13 @@ def _job(job: tuple[str, int, int, str]) -> dict:
                 "meta": [], "kmeta": [], "rows": [],
             }
         loose = [s for s in replay_detail(symbol, tf, bars, False) if s["when"] >= cutoff]
-        hits = [s for s in replay_detail(symbol, tf, bars, True) if s["when"] >= cutoff]
+        hits = [
+            s
+            for s in replay_detail(
+                symbol, tf, bars, True, allow_session_gap=allow_gap
+            )
+            if s["when"] >= cutoff
+        ]
         hit_when = {s["when"] for s in hits}
         killed = [s for s in loose if s["when"] not in hit_when]
         rows = simulate_outcomes(symbol, tf, bars_to_strategy_df(bars), hits)
@@ -114,19 +120,32 @@ def main() -> None:
     )
     ap.add_argument("--tfs", type=str, default=",".join(str(t) for t in DEFAULT_TFS))
     ap.add_argument("--symbols", type=str, default=",".join(DEFAULT_SYMBOLS))
-    ap.add_argument("--outdir", type=str, default=str(ROOT / "reports" / "backtest"))
+    ap.add_argument(
+        "--allow-session-gap",
+        action="store_true",
+        help="回测对比用：放开 1m/5m 形态跨收盘断点（实盘口径不变）",
+    )
+    ap.add_argument("--outdir", type=str, default="")
     args = ap.parse_args()
 
     tfs = [int(x) for x in args.tfs.split(",") if x.strip()]
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
-    outdir = Path(args.outdir)
+    outdir = Path(
+        args.outdir
+        or (ROOT / "reports" / ("backtest_gap" if args.allow_session_gap else "backtest"))
+    )
     shutil.rmtree(outdir, ignore_errors=True)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    jobs = [(s, tf, args.days, str(outdir)) for tf in tfs for s in symbols]
+    jobs = [
+        (s, tf, args.days, str(outdir), args.allow_session_gap)
+        for tf in tfs
+        for s in symbols
+    ]
     print(
         f"[backtest] 品种 {len(symbols)} × 周期 {tfs} × {args.days} 天，"
-        f"workers={args.workers}，作业 {len(jobs)}",
+        f"workers={args.workers}，作业 {len(jobs)}，"
+        f"跨断点={'放开(仅回测)' if args.allow_session_gap else '按实盘'}",
         flush=True,
     )
 
@@ -150,6 +169,7 @@ def main() -> None:
         },
         "symbols": symbols,
         "tfs": tfs,
+        "allow_session_gap": args.allow_session_gap,
         "by_tf": {},
     }
     dirs = []
@@ -208,22 +228,24 @@ def main() -> None:
     )
 
     labels = "/".join(DURATION_LABELS.get(tf, str(tf)) for tf in tfs)
+    base = "/backtest/gap" if args.allow_session_gap else "/backtest"
+    tag = "v4 标定 · 放开跨断点(仅回测)" if args.allow_session_gap else "v4 标定"
     subtitle = (
-        f"{len(symbols)} 品种 × {args.days} 天 × {labels} · v4 标定 · "
+        f"{len(symbols)} 品种 × {args.days} 天 × {labels} · {tag} · "
         f"严格 {total_strict} / 改前 {total_loose} · 胜率 {wr} · 期望(以 swing 计) {ex_} · "
         f"生成 {summary['generated_at']}"
     )
     n = build_gallery(
         dirs, True, outdir / "gallery_single.html", subtitle,
-        nav='<a href="/backtest/killed">查看被严格闸滤掉的信号 →</a>',
+        nav=f'<a href="{base}/killed">查看被严格闸滤掉的信号 →</a>',
     )
     ksub = (
-        f"{len(symbols)} 品种 × {args.days} 天 × {labels} · v4 标定 · "
+        f"{len(symbols)} 品种 × {args.days} 天 × {labels} · {tag} · "
         f"改前 {total_loose} 条中滤掉 {total_killed} 条 · 生成 {summary['generated_at']}"
     )
     kn = build_gallery(
         kdirs, True, outdir / "gallery_killed.html", ksub,
-        title="被滤信号", nav='<a href="/backtest">← 返回命中画廊</a>',
+        title="被滤信号", nav=f'<a href="{base}">← 返回命中画廊</a>',
     )
     print(
         f"[backtest] 完成：命中画廊 {n} 张 -> {outdir / 'gallery_single.html'}；"

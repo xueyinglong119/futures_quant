@@ -16,9 +16,19 @@ from core.hs_monitor import TF_CONFIGS, bars_to_strategy_df, make_strategy
 from core.kline_store import connect, load_bars
 
 
-def replay_detail(symbol: str, duration_sec: int, bars: list[dict], strict: bool):
+def replay_detail(
+    symbol: str,
+    duration_sec: int,
+    bars: list[dict],
+    strict: bool,
+    *,
+    allow_session_gap: bool = False,
+):
     strat = make_strategy(duration_sec)
     strat.strict_shape = strict
+    if allow_session_gap:
+        # 只用于回测对比：允许 1m/5m 形态跨 15:00→21:00 这类收盘断点
+        strat.max_bar_gap_minutes = float("inf")
     df_all = bars_to_strategy_df(bars)
     window = TF_CONFIGS[duration_sec].lookback_bars if duration_sec in TF_CONFIGS else 400
     min_len = strat.max_span_bars + strat.pivot_order * 2 + 5
