@@ -39,7 +39,7 @@ class HeadShouldersStrategy:
     头是区间里的极值。一边可以有两个肩，取其中能和另一边配成形态的那一对。
     颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的一半。
     两肩都要明显离开颈线。右肩拐点确认（再走出 pivot_order 根）即告警/开仓，不必等破颈线。
-    strict_shape 质量闸：头肩距对称比≥0.6、左右肩价差≤颈线1.5%、肩到颈线回撤≤头肩距；
+    strict_shape 质量闸：头肩距对称比≥0.6、左右肩价差≤颈线1.5%、肩到颈线回撤≤1.5×头肩距；
     ≤15m 周期形态内相邻 K 线间隙>130 分钟（跨收盘/夜盘）即拒。
     """
 
@@ -59,6 +59,7 @@ class HeadShouldersStrategy:
         strict_shape: bool = True,
         shoulder_sym_ratio: float = 0.6,
         max_shoulder_spread_ratio: float = 0.015,
+        max_neck_pull_ratio: float = 1.5,
         max_bar_gap_minutes: float = 130.0,
         gap_rule_max_duration_sec: int = 900,
     ):
@@ -76,6 +77,7 @@ class HeadShouldersStrategy:
         self.strict_shape = strict_shape
         self.shoulder_sym_ratio = shoulder_sym_ratio
         self.max_shoulder_spread_ratio = max_shoulder_spread_ratio
+        self.max_neck_pull_ratio = max_neck_pull_ratio
         self.max_bar_gap_minutes = max_bar_gap_minutes
         self.gap_rule_max_duration_sec = gap_rule_max_duration_sec
         self._traded_patterns: dict[str, set[str]] = {}
@@ -251,7 +253,7 @@ class HeadShouldersStrategy:
                 return None
             pull_l = (neck_at_l - price_l) if bottom else (price_l - neck_at_l)
             pull_r = (neck_at_r - price_r) if bottom else (price_r - neck_at_r)
-            if pull_l > d_l or pull_r > d_r:
+            if pull_l > self.max_neck_pull_ratio * d_l or pull_r > self.max_neck_pull_ratio * d_r:
                 return None
         return height, neck_head
 
