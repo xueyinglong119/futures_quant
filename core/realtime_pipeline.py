@@ -139,9 +139,15 @@ def _bar_payload_equal(a: dict, b: dict) -> bool:
     return True
 
 
+# 最后一根：墙钟过结束时刻后再等这么久才当收盘（防半截；已出现下一根时不依赖此值）
+_BAR_CLOSE_GRACE_SEC = 0.5
+
+
 def _bar_closed(start_utc: datetime, duration_sec: int, now_utc: datetime) -> bool:
     """按墙钟判断该根是否已走完；未完成的只留在行情序列里，不入库。"""
-    return start_utc + timedelta(seconds=duration_sec + 3) <= now_utc
+    return (
+        start_utc + timedelta(seconds=duration_sec + _BAR_CLOSE_GRACE_SEC) <= now_utc
+    )
 
 
 def _in_beijing_session(dt: datetime) -> bool:
@@ -191,7 +197,7 @@ def serial_to_rows(klines: pd.DataFrame, duration_sec: int, now_utc: datetime) -
     """解析序列，只返回已收盘 K；正在走的最后一根不入库。
 
     - 已被下一根顶替的（[:-1]）视为收盘。
-    - 序列最后一根仅当墙钟已过结束时刻 + 3 秒才入库（小节/收盘后收尾）。
+    - 序列最后一根仅当墙钟已过结束时刻 + 0.5 秒才入库（小节/收盘后收尾）。
     """
     if klines is None or len(klines) == 0:
         return []
@@ -308,7 +314,8 @@ class RealtimePipeline:
                         flush=True,
                     )
 
-                deadline_sec = 1.0 if pending else 5.0
+                # 订齐后短轮询，尽快发现新收盘 K；订阅中稍长一点给行情喘息
+                deadline_sec = 0.5 if pending else 0.25
                 api.wait_update(deadline=time_monotonic_deadline(api, deadline_sec))
 
                 # 序列有数据后纳入监控（不必等全部 80 个订完）
@@ -365,7 +372,8 @@ class RealtimePipeline:
         print(f"[pipeline] 启动补齐 入库 {wrote} 根，新告警 {alerts}", flush=True)
 
     def _ingest(self, conn, symbol: str, duration_sec: int, klines: pd.DataFrame) -> tuple[int, int]:
-        now_utc = datetime.now(timezone.utc).replace(tzinfo=None, microsecond=0)
+        # 保留亚秒，配合 0.5s 收盘宽限；勿截成整秒否则宽限失效
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
         closed = serial_to_rows(klines, duration_sec, now_utc)
         if not closed:
             return 0, 0
@@ -390,23 +398,6 @@ class RealtimePipeline:
         if not fresh:
             return 0, 0
         fresh.sort(key=lambda r: r["stored"])
-        upsert_bars(
-            conn,
-            symbol,
-            duration_sec,
-            [
-                {
-                    "datetime_end": row["stored"],
-                    "open": row["open"],
-                    "high": row["high"],
-                    "low": row["low"],
-                    "close": row["close"],
-                    "volume": row["volume"],
-                    "open_oi": row["open_oi"],
-                }
-                for row in fresh
-            ],
-        )
         alerts = 0
         do_hs = duration_sec in HS_MONITOR_DURATIONS
         lookback = (
@@ -414,6 +405,7 @@ class RealtimePipeline:
             if do_hs
             else TAIL_LENGTH.get(duration_sec, 200)
         )
+        # 先更新内存窗口并告警，再写库——缩短「K线时间 → 发现时间」
         for row in fresh:
             correction = bool(row.get("correction"))
             if do_hs:
@@ -427,7 +419,7 @@ class RealtimePipeline:
                 "volume": row["volume"],
                 "open_oi": row["open_oi"],
             }
-            # 修正半截 K：只更新库（和检测窗口），不重复模拟成交/告警
+            # 修正半截 K：只更新检测窗口，不重复模拟成交/告警
             if correction:
                 continue
             if not do_hs:
@@ -446,6 +438,23 @@ class RealtimePipeline:
                 toast=False,
                 emit=True,
             )
+        upsert_bars(
+            conn,
+            symbol,
+            duration_sec,
+            [
+                {
+                    "datetime_end": row["stored"],
+                    "open": row["open"],
+                    "high": row["high"],
+                    "low": row["low"],
+                    "close": row["close"],
+                    "volume": row["volume"],
+                    "open_oi": row["open_oi"],
+                }
+                for row in fresh
+            ],
+        )
         if any(not r.get("correction") for r in fresh) and duration_sec == DURATION_1D:
             _refresh_htf_from_daily(conn, symbol)
         if duration_sec == DURATION_1M:

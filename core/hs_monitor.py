@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -188,8 +189,15 @@ def emit_alert(
         )
         alert_id = alert.id
         if push:
-            push_result = send_alert_push(alert)
-            print(f"App推送结果: {push_result}", flush=True)
+            # 推送走后台线程，不堵住行情循环里的「发现时间」
+            def _push() -> None:
+                try:
+                    push_result = send_alert_push(alert)
+                    print(f"App推送结果: {push_result}", flush=True)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"App推送失败: {exc}", flush=True)
+
+            threading.Thread(target=_push, name="hs-push", daemon=True).start()
     except Exception as exc:  # noqa: BLE001
         print(f"写入/推送 App 告警失败: {exc}", flush=True)
     return alert_id
