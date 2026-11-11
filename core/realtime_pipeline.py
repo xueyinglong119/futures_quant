@@ -70,8 +70,8 @@ LIVE_TAIL_LENGTH: dict[int, int] = {
 # 非头肩周期内存裁剪用
 TAIL_LENGTH = LIVE_TAIL_LENGTH
 
-# 边订阅边监控：每批品种数
-SUBSCRIBE_BATCH = 8
+# 订阅阶段每批挂接品种数（订齐前不做入库/告警，尽量快挂满）
+SUBSCRIBE_BATCH = 16
 
 # 1m 走到这些北京时刻时，刷新会话 30m/1h/2h/3h/4h
 _SESSION_REFRESH_MINUTES = get_all_session_trigger_minutes()
@@ -273,7 +273,7 @@ class RealtimePipeline:
             ingest_labels = [DURATION_LABELS[d] for d in INGEST_DURATIONS]
             print(
                 f"[pipeline] 品种 {len(symbols)}，入库周期 {','.join(ingest_labels)} "
-                f"（直播短窗口；回看用库；边订边监控；30m/1h/2h/3h/4h 由 1m 合成）",
+                f"（先订满再监控；直播短窗口；回看用库；30m/1h/2h/3h/4h 由 1m 合成）",
                 flush=True,
             )
             serials: dict[tuple[str, int], pd.DataFrame] = {}
@@ -283,47 +283,56 @@ class RealtimePipeline:
             bootstrap_queue: list[str] = []
             total = len(symbols)
             subscribed_n = 0
-            subscribe_done_logged = False
+            initial_catchup_done = False
+
+            # —— 阶段1：只挂订阅，不入库/不告警/不做会话合成 ——
+            while pending and in_trading_window(datetime.now(TZ)):
+                batch = pending[:SUBSCRIBE_BATCH]
+                del pending[:SUBSCRIBE_BATCH]
+                for symbol in batch:
+                    for dur in INGEST_DURATIONS:
+                        length = LIVE_TAIL_LENGTH.get(dur, 30)
+                        try:
+                            serials[(symbol, dur)] = api.get_kline_serial(
+                                symbol, dur, data_length=length
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            print(
+                                f"[pipeline] 订阅失败 {symbol} "
+                                f"{DURATION_LABELS.get(dur, dur)}: {exc}",
+                                flush=True,
+                            )
+                    try:
+                        api.wait_update(
+                            deadline=time_monotonic_deadline(api, 0.05)
+                        )
+                    except Exception:
+                        pass
+                subscribed_n += len(batch)
+                # 轻量泵一下行情，让序列开始填充，但仍不 ingest
+                try:
+                    api.wait_update(deadline=time_monotonic_deadline(api, 0.2))
+                except Exception:
+                    pass
+                ready_n = sum(1 for kl in serials.values() if _is_ready(kl))
+                print(
+                    f"[pipeline] 订阅进度 {subscribed_n}/{total} "
+                    f"序列 {len(serials)} 已就绪 {ready_n} "
+                    f"本批 {batch[0]}..{batch[-1]}",
+                    flush=True,
+                )
+
+            if not in_trading_window(datetime.now(TZ)):
+                return
+
+            print(
+                f"[pipeline] 订阅已挂满 {total}，等待序列就绪后开始监控",
+                flush=True,
+            )
 
             while in_trading_window(datetime.now(TZ)):
-                # 订阅未完成时不做会话重建，避免 会话合成 堵住后续 get_kline_serial
-                defer_session = bool(pending)
+                api.wait_update(deadline=time_monotonic_deadline(api, 0.25))
 
-                # —— 还有未订品种：先挂下一批短序列，再和已就绪品种一起监控 ——
-                if pending:
-                    batch = pending[:SUBSCRIBE_BATCH]
-                    del pending[:SUBSCRIBE_BATCH]
-                    for symbol in batch:
-                        for dur in INGEST_DURATIONS:
-                            length = LIVE_TAIL_LENGTH.get(dur, 30)
-                            try:
-                                serials[(symbol, dur)] = api.get_kline_serial(
-                                    symbol, dur, data_length=length
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                print(
-                                    f"[pipeline] 订阅失败 {symbol} "
-                                    f"{DURATION_LABELS.get(dur, dur)}: {exc}",
-                                    flush=True,
-                                )
-                        try:
-                            api.wait_update(
-                                deadline=time_monotonic_deadline(api, 0.15)
-                            )
-                        except Exception:
-                            pass
-                    subscribed_n += len(batch)
-                    print(
-                        f"[pipeline] 订阅进度 {subscribed_n}/{total} "
-                        f"序列 {len(serials)} 本批 {batch[0]}..{batch[-1]}",
-                        flush=True,
-                    )
-
-                # 订齐后短轮询，尽快发现新收盘 K；订阅中稍长一点给行情喘息
-                deadline_sec = 0.5 if pending else 0.25
-                api.wait_update(deadline=time_monotonic_deadline(api, deadline_sec))
-
-                # 序列有数据后纳入监控（不必等全部 80 个订完）
                 newly: list[tuple[str, int]] = []
                 for key, kl in serials.items():
                     if key in armed:
@@ -331,7 +340,9 @@ class RealtimePipeline:
                     if _is_ready(kl):
                         armed.add(key)
                         newly.append(key)
-                if newly:
+
+                # 首次：对已就绪序列做一轮补齐；未就绪的稍后纳入
+                if newly and not initial_catchup_done:
                     wrote = 0
                     alerts = 0
                     for symbol, dur in newly:
@@ -340,7 +351,7 @@ class RealtimePipeline:
                             symbol,
                             dur,
                             serials[(symbol, dur)],
-                            session_refresh=not defer_session,
+                            session_refresh=False,
                         )
                         wrote += n
                         alerts += a
@@ -349,16 +360,45 @@ class RealtimePipeline:
                             and symbol not in bootstrapped
                             and symbol not in bootstrap_queue
                         ):
-                            # 订齐前只排队，避免每个品种立刻重算 30m~4h
                             bootstrap_queue.append(symbol)
                     print(
-                        f"[pipeline] 新就绪 {len(newly)} 序列，监控中 {len(armed)}，"
-                        f"待订品种 {len(pending)}，补齐入库 {wrote}，告警 {alerts}",
+                        f"[pipeline] 启动补齐 新就绪 {len(newly)}，监控中 {len(armed)}/"
+                        f"{len(serials)}，入库 {wrote}，告警 {alerts}",
+                        flush=True,
+                    )
+                    if len(armed) >= len(serials):
+                        initial_catchup_done = True
+                        print("[pipeline] 全部序列就绪，进入实时监控", flush=True)
+                    newly = []  # 本批已 ingest，避免下面重复
+
+                if newly and initial_catchup_done:
+                    wrote = 0
+                    alerts = 0
+                    for symbol, dur in newly:
+                        n, a = self._ingest(
+                            conn,
+                            symbol,
+                            dur,
+                            serials[(symbol, dur)],
+                            session_refresh=True,
+                        )
+                        wrote += n
+                        alerts += a
+                        if (
+                            dur == DURATION_1M
+                            and symbol not in bootstrapped
+                            and symbol not in bootstrap_queue
+                        ):
+                            bootstrap_queue.append(symbol)
+                    print(
+                        f"[pipeline] 新就绪 {len(newly)} 序列，监控中 {len(armed)}/"
+                        f"{len(serials)}，补齐入库 {wrote}，告警 {alerts}",
                         flush=True,
                     )
 
                 if not armed:
                     continue
+
                 wrote = 0
                 alerts = 0
                 for key in list(armed):
@@ -370,7 +410,7 @@ class RealtimePipeline:
                         key[0],
                         key[1],
                         kl,
-                        session_refresh=not defer_session,
+                        session_refresh=True,
                     )
                     wrote += n
                     alerts += a
@@ -380,15 +420,8 @@ class RealtimePipeline:
                         flush=True,
                     )
 
-                # 全部订阅挂上后，再分批做会话 K 启动补齐（每圈少量，不堵行情）
-                if not pending and bootstrap_queue:
-                    if not subscribe_done_logged:
-                        print(
-                            f"[pipeline] 订阅已挂满 {total}，开始分批会话K补齐 "
-                            f"队列 {len(bootstrap_queue)}",
-                            flush=True,
-                        )
-                        subscribe_done_logged = True
+                # 分批会话 K 启动补齐（每圈少量）
+                if bootstrap_queue:
                     chunk = bootstrap_queue[:4]
                     del bootstrap_queue[:4]
                     for symbol in chunk:
