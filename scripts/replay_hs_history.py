@@ -68,6 +68,7 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--tfs", type=str, default="", help="逗号分隔周期秒，缺省全部监控周期")
+    ap.add_argument("--symbols", type=str, default="", help="逗号分隔品种，缺省全主力")
     args = ap.parse_args()
 
     tfs = (
@@ -77,13 +78,16 @@ def main() -> None:
     )
     cutoff = datetime.now() - timedelta(days=args.days)
     conn = connect()
-    with conn.cursor() as cur:
-        cur.execute(
-            f"SELECT DISTINCT symbol FROM {TABLE_NAME} "
-            "WHERE duration_sec=60 AND datetime_end>=%s AND symbol LIKE 'KQ.m@%%'",
-            (cutoff,),
-        )
-        symbols = [r[0] for r in cur.fetchall()]
+    if args.symbols:
+        symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    else:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT DISTINCT symbol FROM {TABLE_NAME} "
+                "WHERE duration_sec=60 AND datetime_end>=%s AND symbol LIKE 'KQ.m@%%'",
+                (cutoff,),
+            )
+            symbols = [r[0] for r in cur.fetchall()]
     print(f"品种 {len(symbols)}，回溯 {args.days} 天，周期 {tfs}", flush=True)
 
     jobs = [(s, tf, args.days) for tf in tfs for s in symbols]
