@@ -131,6 +131,11 @@ class DbHsMonitor:
         if not self._primed:
             self._prime(conn, symbols)
             return 0
+        if self.broker is not None:
+            try:
+                self.broker.retry_pending()
+            except Exception:
+                traceback.print_exc()
 
         marks = load_watermarks(conn, HS_MONITOR_DURATIONS, symbols)
         alerts = 0

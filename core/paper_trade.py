@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -35,6 +36,9 @@ MARGIN_ADD = 0.01
 FEE_ADD = 0.01
 MAX_LOTS = 8
 MAX_LOSS_PER_TRADE = 1_000.0
+# 开盘瞬间行情连接未就绪时取不到合约资料，信号先挂起，每 10 秒重试，最多 5 分钟
+PENDING_RETRY_SEC = 10.0
+PENDING_TTL_SEC = 300.0
 # 小于这个数时，交易所字段更像成交额费率，而不是每手元
 _RATIO_CEILING = 0.02
 
@@ -121,6 +125,25 @@ class OpenPosition:
     tp_price: float
     sl_price: float
     last_price: float
+
+
+@dataclass
+class PendingEntry:
+    """已出信号但合约资料暂时取不到，等行情连接就绪后再开仓。"""
+
+    symbol: str
+    duration_sec: int
+    when: datetime
+    side: str
+    entry: float
+    swing: float
+    extreme: float
+    head: float
+    kind: str
+    reason: str
+    alert_id: str | None
+    next_try: float
+    deadline: float
 
 
 def _num(value: Any) -> float | None:
@@ -233,12 +256,23 @@ class ContractBook:
 
     def __init__(self, api: Any):
         self.api = api
-        self._cache: dict[str, ContractSpec | None] = {}
+        self._cache: dict[str, ContractSpec] = {}
+        self.last_error: str | None = None
 
     def get(self, symbol: str) -> ContractSpec | None:
-        if symbol not in self._cache:
-            self._cache[symbol] = self._load(symbol)
-        return self._cache[symbol]
+        cached = self._cache.get(symbol)
+        if cached is not None:
+            return cached
+        try:
+            spec = self._load(symbol)
+        except Exception as exc:  # noqa: BLE001
+            # 夜盘开盘第一个 tick 常见「获取行情信息超时」，连接就绪后可重试
+            self.last_error = str(exc)
+            return None
+        self.last_error = None
+        if spec is not None:
+            self._cache[symbol] = spec
+        return spec
 
     def _load(self, symbol: str) -> ContractSpec | None:
         symbols = [symbol]
@@ -281,6 +315,7 @@ class PaperBroker:
         self.initial_cash = INITIAL_CASH
         self.cash = INITIAL_CASH
         self._open: dict[tuple[str, int], OpenPosition] = {}
+        self._pending: dict[tuple[str, int], PendingEntry] = {}
         ensure_schema(conn)
         self._load()
 
@@ -299,20 +334,35 @@ class PaperBroker:
         swing = _num(detail.get("swing"))
         extreme = _num(detail.get("extreme"))
         head = _num(detail.get("head"))
+        name = get_display_name(symbol)
         if side not in ("long", "short") or swing is None or swing <= 0 or extreme is None or head is None:
-            self._log(f"跳过 {symbol} {when}：没有可用的头到左肩高度")
+            self._log(f"跳过 {name} {when}：没有可用的头到左肩高度")
             return
         if (symbol, duration_sec) in self._open:
-            self._log(f"跳过 {symbol} {when}：该周期已有持仓")
+            self._log(f"跳过 {name} {when}：该周期已有持仓")
             return
         if df is None or len(df) == 0:
             return
         entry = float(df.iloc[-1]["close"])
         if entry <= 0:
             return
+        kind = "头肩顶" if side == "short" else "头肩底"
+        reason = str(getattr(signal, "reason", "") or "")
         spec = self.specs.get(symbol)
         if spec is None:
-            self._log(f"跳过 {get_display_name(symbol)} {when}：没有交易所保证金或手续费")
+            self._defer(
+                symbol=symbol,
+                duration_sec=duration_sec,
+                when=when,
+                side=side,
+                entry=entry,
+                swing=swing,
+                extreme=extreme,
+                head=head,
+                kind=kind,
+                reason=reason,
+                alert_id=alert_id,
+            )
             return
         self._open_trade(
             symbol=symbol,
@@ -324,10 +374,97 @@ class PaperBroker:
             extreme=extreme,
             head=head,
             spec=spec,
-            kind="头肩顶" if side == "short" else "头肩底",
-            reason=str(getattr(signal, "reason", "") or ""),
+            kind=kind,
+            reason=reason,
             alert_id=alert_id,
         )
+
+    def _defer(
+        self,
+        *,
+        symbol: str,
+        duration_sec: int,
+        when: datetime,
+        side: str,
+        entry: float,
+        swing: float,
+        extreme: float,
+        head: float,
+        kind: str,
+        reason: str,
+        alert_id: str | None,
+    ) -> None:
+        """合约资料取不到时先挂起，等行情连接就绪后按原信号价补开。"""
+        when = _as_naive(when)
+        now = time.monotonic()
+        key = (symbol, duration_sec)
+        replaced = key in self._pending
+        self._pending[key] = PendingEntry(
+            symbol=symbol,
+            duration_sec=duration_sec,
+            when=when,
+            side=side,
+            entry=entry,
+            swing=swing,
+            extreme=extreme,
+            head=head,
+            kind=kind,
+            reason=reason,
+            alert_id=alert_id,
+            next_try=now + PENDING_RETRY_SEC,
+            deadline=now + PENDING_TTL_SEC,
+        )
+        name = get_display_name(symbol)
+        label = DURATION_LABELS.get(duration_sec, str(duration_sec))
+        error = self.specs.last_error or "缺少保证金/手续费字段"
+        prefix = "改挂" if replaced else "暂缓"
+        self._log(
+            f"{prefix} {name} {label} {when:%m-%d %H:%M}：取合约资料失败（{error}），"
+            f"每 {PENDING_RETRY_SEC:.0f}s 重试，最多 {PENDING_TTL_SEC / 60:.0f} 分钟"
+        )
+
+    def retry_pending(self) -> None:
+        """每个行情 tick 调一次：行情连接恢复后把挂起的信号补开。"""
+        if not self._pending:
+            return
+        now = time.monotonic()
+        for key, item in list(self._pending.items()):
+            if now < item.next_try:
+                continue
+            name = get_display_name(item.symbol)
+            label = DURATION_LABELS.get(item.duration_sec, str(item.duration_sec))
+            if now >= item.deadline:
+                self._pending.pop(key, None)
+                self._log(
+                    f"放弃 {name} {label} {item.when:%m-%d %H:%M}："
+                    f"{PENDING_TTL_SEC / 60:.0f} 分钟内没取到合约保证金/手续费"
+                )
+                continue
+            spec = self.specs.get(item.symbol)
+            if spec is None:
+                item.next_try = now + PENDING_RETRY_SEC
+                continue
+            self._pending.pop(key, None)
+            if key in self._open:
+                self._log(f"跳过 {name} {label} {item.when:%m-%d %H:%M}：该周期已有持仓")
+                continue
+            try:
+                self._open_trade(
+                    symbol=item.symbol,
+                    duration_sec=item.duration_sec,
+                    when=item.when,
+                    side=item.side,
+                    entry=item.entry,
+                    swing=item.swing,
+                    extreme=item.extreme,
+                    head=item.head,
+                    spec=spec,
+                    kind=item.kind,
+                    reason=item.reason,
+                    alert_id=item.alert_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"重试开仓失败 {name} {label} {item.when:%m-%d %H:%M}：{exc}")
 
     def on_bar(self, symbol: str, duration_sec: int, when: datetime, bar: dict) -> None:
         self._sync_from_db()
