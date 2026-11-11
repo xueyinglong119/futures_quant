@@ -39,6 +39,8 @@ class HeadShouldersStrategy:
     头是区间里的极值。一边可以有两个肩，取其中能和另一边配成形态的那一对。
     颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的一半。
     两肩都要明显离开颈线。右肩拐点确认（再走出 pivot_order 根）即告警/开仓，不必等破颈线。
+    strict_shape 质量闸：头肩距对称比≥0.6、左右肩价差≤颈线1.5%、肩到颈线回撤≤头肩距；
+    ≤15m 周期形态内相邻 K 线间隙>130 分钟（跨收盘/夜盘）即拒。
     """
 
     def __init__(
@@ -53,6 +55,12 @@ class HeadShouldersStrategy:
         stop_beyond_head_ratio: float = 0.005,
         take_profit_at_neck: bool = True,
         max_volume: int = 1,
+        duration_sec: int = 0,
+        strict_shape: bool = True,
+        shoulder_sym_ratio: float = 0.6,
+        max_shoulder_spread_ratio: float = 0.015,
+        max_bar_gap_minutes: float = 130.0,
+        gap_rule_max_duration_sec: int = 900,
     ):
         self.pivot_order = pivot_order
         self.shoulder_tolerance = shoulder_tolerance
@@ -64,6 +72,12 @@ class HeadShouldersStrategy:
         self.stop_beyond_head_ratio = stop_beyond_head_ratio
         self.take_profit_at_neck = take_profit_at_neck
         self.max_volume = max_volume
+        self.duration_sec = duration_sec
+        self.strict_shape = strict_shape
+        self.shoulder_sym_ratio = shoulder_sym_ratio
+        self.max_shoulder_spread_ratio = max_shoulder_spread_ratio
+        self.max_bar_gap_minutes = max_bar_gap_minutes
+        self.gap_rule_max_duration_sec = gap_rule_max_duration_sec
         self._traded_patterns: dict[str, set[str]] = {}
         self._active_trades: dict[str, _ActiveTrade] = {}
 
@@ -226,6 +240,19 @@ class HeadShouldersStrategy:
                 return None
         elif price_l - neck_at_l < 0.4 * height or price_r - neck_at_r < 0.4 * height:
             return None
+        if self.strict_shape:
+            d_l = (price_l - price_h) if bottom else (price_h - price_l)
+            d_r = (price_r - price_h) if bottom else (price_h - price_r)
+            if max(d_l, d_r) <= 0:
+                return None
+            if min(d_l, d_r) / max(d_l, d_r) < self.shoulder_sym_ratio:
+                return None
+            if abs(price_l - price_r) > self.max_shoulder_spread_ratio * abs(neck_head):
+                return None
+            pull_l = (neck_at_l - price_l) if bottom else (price_l - neck_at_l)
+            pull_r = (neck_at_r - price_r) if bottom else (price_r - neck_at_r)
+            if pull_l > d_l or pull_r > d_r:
+                return None
         return height, neck_head
 
     def _register_short(self, symbol: str, price_h: float, neck: float) -> None:
@@ -459,6 +486,16 @@ class HeadShouldersStrategy:
                     )
                     if shaped is None:
                         continue
+                    if (
+                        self.strict_shape
+                        and 0 < self.duration_sec <= self.gap_rule_max_duration_sec
+                    ):
+                        seg = pd.to_datetime(klines["datetime"].iloc[idx_l : last_idx + 1])
+                        gaps = seg.diff().dropna()
+                        if len(gaps) and float(
+                            gaps.max().total_seconds()
+                        ) > self.max_bar_gap_minutes * 60:
+                            continue
                     height, _neck_head = shaped
                     n1, p1 = neck_l
                     n2, p2 = neck_r

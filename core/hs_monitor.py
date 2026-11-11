@@ -68,6 +68,7 @@ def make_strategy(duration_sec: int) -> HeadShouldersStrategy:
         max_right_above_left_ratio=0.015,
         min_head_neck_ratio=0.008,
         max_volume=1,
+        duration_sec=duration_sec,
     )
 
 
