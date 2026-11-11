@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -39,8 +39,11 @@ class HeadShouldersStrategy:
     头是区间里的极值。一边可以有两个肩，取其中能和另一边配成形态的那一对。
     颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的一半。
     两肩都要明显离开颈线。右肩拐点确认（再走出 pivot_order 根）即告警/开仓，不必等破颈线。
-    strict_shape 质量闸：头肩距对称比≥0.6、左右肩价差≤颈线1.5%、肩到颈线回撤≤1.5×头肩距；
-    ≤15m 周期形态内相邻 K 线间隙>130 分钟（跨收盘/夜盘）即拒。
+    strict_shape 质量闸：左右肩价差≤颈线1.5%、颈线斜率≤0.5%、≤2h 周期形态跨度≤5 个交易日、
+    ≤15m 周期形态内相邻 K 线间隙>130 分钟（跨收盘/夜盘）即拒；
+    同高度候选三元组取两肩价差最小者（经典对称本义）。
+    肩部主导性：左肩须为其与头之间同向拐点极端；右肩另须为确认窗内外侧极端
+    （其后 2×pivot_order 根内不得出现更极端的同向拐点）。
     """
 
     def __init__(
@@ -57,9 +60,11 @@ class HeadShouldersStrategy:
         max_volume: int = 1,
         duration_sec: int = 0,
         strict_shape: bool = True,
-        shoulder_sym_ratio: float = 0.6,
         max_shoulder_spread_ratio: float = 0.015,
-        max_neck_pull_ratio: float = 1.5,
+        max_neck_slope_ratio: float = 0.005,
+        dominance_reaction_ratio: float = 3.0,
+        max_span_sessions: int = 5,
+        session_cap_max_duration_sec: int = 7200,
         max_bar_gap_minutes: float = 130.0,
         gap_rule_max_duration_sec: int = 900,
     ):
@@ -75,13 +80,17 @@ class HeadShouldersStrategy:
         self.max_volume = max_volume
         self.duration_sec = duration_sec
         self.strict_shape = strict_shape
-        self.shoulder_sym_ratio = shoulder_sym_ratio
         self.max_shoulder_spread_ratio = max_shoulder_spread_ratio
-        self.max_neck_pull_ratio = max_neck_pull_ratio
+        self.max_neck_slope_ratio = max_neck_slope_ratio
+        self.dominance_reaction_ratio = dominance_reaction_ratio
+        self.max_span_sessions = max_span_sessions
+        self.session_cap_max_duration_sec = session_cap_max_duration_sec
         self.max_bar_gap_minutes = max_bar_gap_minutes
         self.gap_rule_max_duration_sec = gap_rule_max_duration_sec
         self._traded_patterns: dict[str, set[str]] = {}
         self._active_trades: dict[str, _ActiveTrade] = {}
+        self.trace: bool = False
+        self.last_trace: list[tuple] = []
 
     def on_bar(
         self,
@@ -104,9 +113,32 @@ class HeadShouldersStrategy:
         if top_signal is not None:
             return top_signal
 
-        return self._detect_head_shoulders_bottom(
+        bottom_signal = self._detect_head_shoulders_bottom(
             pivot_lows, pivot_highs, klines, volume, traded, symbol
         )
+        if bottom_signal is not None:
+            return bottom_signal
+
+        return None
+
+    def _register_pending(
+        self,
+        signal: Signal,
+        symbol: str,
+        pattern_id: str,
+        head_key: str,
+        side: str,
+        price_h: float,
+        neck: float,
+        traded: set[str],
+    ) -> Signal | None:
+        traded.add(pattern_id)
+        traded.add(head_key)
+        if side == "short":
+            self._register_short(symbol, price_h, neck)
+        else:
+            self._register_long(symbol, price_h, neck)
+        return signal
 
     def check_exit(
         self, klines: pd.DataFrame, symbol: str, position: int
@@ -243,17 +275,9 @@ class HeadShouldersStrategy:
         elif price_l - neck_at_l < 0.4 * height or price_r - neck_at_r < 0.4 * height:
             return None
         if self.strict_shape:
-            d_l = (price_l - price_h) if bottom else (price_h - price_l)
-            d_r = (price_r - price_h) if bottom else (price_h - price_r)
-            if max(d_l, d_r) <= 0:
-                return None
-            if min(d_l, d_r) / max(d_l, d_r) < self.shoulder_sym_ratio:
-                return None
             if abs(price_l - price_r) > self.max_shoulder_spread_ratio * abs(neck_head):
                 return None
-            pull_l = (neck_at_l - price_l) if bottom else (price_l - neck_at_l)
-            pull_r = (neck_at_r - price_r) if bottom else (price_r - neck_at_r)
-            if pull_l > self.max_neck_pull_ratio * d_l or pull_r > self.max_neck_pull_ratio * d_r:
+            if abs(p1 - p2) > self.max_neck_slope_ratio * abs(neck_head):
                 return None
         return height, neck_head
 
@@ -306,9 +330,6 @@ class HeadShouldersStrategy:
         if found is None:
             return None
         idx_l, price_l, idx_h, price_h, idx_r, price_r, neck, pattern_id, neck_l_idx, neck_r_idx = found
-        traded.add(pattern_id)
-        traded.add(f"top-head:{idx_h}")
-        self._register_short(symbol, price_h, neck)
         valley = self._swing_low(klines.low, idx_l, idx_h)
         swing = None if valley is None else price_h - valley
 
@@ -318,7 +339,7 @@ class HeadShouldersStrategy:
         neck_l_time = _format_bar_time(klines.iloc[neck_l_idx]["datetime"])
         neck_r_time = _format_bar_time(klines.iloc[neck_r_idx]["datetime"])
 
-        return Signal(
+        signal = Signal(
             target_volume=-volume,
             action="sell",
             reason=(
@@ -343,6 +364,10 @@ class HeadShouldersStrategy:
                 "right_idx": idx_r,
             },
         )
+        return self._register_pending(
+            signal, symbol, pattern_id, f"top-head:{idx_h}", "short",
+            price_h, neck, traded,
+        )
 
     def _detect_head_shoulders_bottom(
         self,
@@ -359,9 +384,6 @@ class HeadShouldersStrategy:
         if found is None:
             return None
         idx_l, price_l, idx_h, price_h, idx_r, price_r, neck, pattern_id, neck_l_idx, neck_r_idx = found
-        traded.add(pattern_id)
-        traded.add(f"bottom-head:{idx_h}")
-        self._register_long(symbol, price_h, neck)
         peak = self._swing_high(klines.high, idx_l, idx_h)
         swing = None if peak is None else peak - price_h
 
@@ -371,7 +393,7 @@ class HeadShouldersStrategy:
         neck_l_time = _format_bar_time(klines.iloc[neck_l_idx]["datetime"])
         neck_r_time = _format_bar_time(klines.iloc[neck_r_idx]["datetime"])
 
-        return Signal(
+        signal = Signal(
             target_volume=volume,
             action="buy",
             reason=(
@@ -396,6 +418,10 @@ class HeadShouldersStrategy:
                 "right_idx": idx_r,
             },
         )
+        return self._register_pending(
+            signal, symbol, pattern_id, f"bottom-head:{idx_h}", "long",
+            price_h, neck, traded,
+        )
 
     def _reaction_neck(
         self,
@@ -414,6 +440,10 @@ class HeadShouldersStrategy:
             return min(inside, key=lambda p: (p[1], p[0]))
         return max(inside, key=lambda p: (p[1], -p[0]))
 
+    def _tr(self, idx_l: int, idx_h: int, idx_r: int, why: str) -> None:
+        if self.trace:
+            self.last_trace.append((idx_l, idx_h, idx_r, why))
+
     def _best_break(
         self,
         pivots: list[tuple[int, float]],
@@ -431,41 +461,102 @@ class HeadShouldersStrategy:
         last_idx = len(closes) - 1
         extreme = klines.low if bottom else klines.high
         best: tuple[float, tuple] | None = None
+        if self.trace:
+            self.last_trace = []
 
         for hi, (idx_h, price_h) in enumerate(pivots):
             for li in range(hi):
                 idx_l, price_l = pivots[li]
                 if idx_h - idx_l < self.pivot_order:
+                    self._tr(idx_l, idx_h, -1, "order_l")
                     continue
                 if idx_h - idx_l > self.max_span_bars:
+                    self._tr(idx_l, idx_h, -1, "span_l")
                     continue
                 if bottom and price_l <= price_h:
+                    self._tr(idx_l, idx_h, -1, "side_l")
                     continue
                 if not bottom and price_l >= price_h:
+                    self._tr(idx_l, idx_h, -1, "side_l")
                     continue
                 for ri in range(hi + 1, len(pivots)):
                     idx_r, price_r = pivots[ri]
+                    if self.strict_shape:
+                        between_l = [
+                            p for p in pivots[li + 1 : hi] if idx_h - p[0] > self.pivot_order
+                        ]
+                        between_r = [
+                            p for p in pivots[hi + 1 : ri] if p[0] - idx_h > self.pivot_order
+                        ]
+                        d_l = (price_l - price_h) if bottom else (price_h - price_l)
+                        d_r = (price_r - price_h) if bottom else (price_h - price_r)
+                        dref = min(d_l, d_r)
+                        if bottom:
+                            dominated = any(
+                                p < price_l
+                                and float(klines.high.iloc[idx_l : ip].max()) - price_l
+                                >= self.dominance_reaction_ratio * dref
+                                for ip, p in between_l
+                            ) or any(
+                                p < price_r
+                                and float(klines.high.iloc[ip : idx_r].max()) - price_r
+                                >= self.dominance_reaction_ratio * dref
+                                for ip, p in between_r
+                            )
+                        else:
+                            dominated = any(
+                                p > price_l
+                                and price_l - float(klines.low.iloc[idx_l : ip].min())
+                                >= self.dominance_reaction_ratio * dref
+                                for ip, p in between_l
+                            ) or any(
+                                p > price_r
+                                and price_r - float(klines.low.iloc[ip : idx_r].min())
+                                >= self.dominance_reaction_ratio * dref
+                                for ip, p in between_r
+                            )
+                        outer = [
+                            p
+                            for p in pivots[ri + 1 :]
+                            if p[0] <= idx_r + 2 * self.pivot_order
+                        ]
+                        if bottom:
+                            dominated = dominated or any(p < price_r for _, p in outer)
+                        else:
+                            dominated = dominated or any(p > price_r for _, p in outer)
+                        if dominated:
+                            self._tr(idx_l, idx_h, idx_r, "dominated")
+                            continue
                     span = idx_r - idx_l
                     if span < self.min_span_bars:
+                        self._tr(idx_l, idx_h, idx_r, "span_min")
                         continue
                     if span > self.max_span_bars:
+                        self._tr(idx_l, idx_h, idx_r, "span_max")
                         break
                     if idx_r - idx_h < self.pivot_order:
+                        self._tr(idx_l, idx_h, idx_r, "order_r")
                         continue
                     # 仅在右肩「刚刚」确认的那一根告警，避免事后补推旧形态
                     if last_idx != idx_r + self.pivot_order:
+                        self._tr(idx_l, idx_h, idx_r, "trigger")
                         continue
                     if bottom and price_r <= price_h:
+                        self._tr(idx_l, idx_h, idx_r, "side_r")
                         continue
                     if not bottom and price_r >= price_h:
+                        self._tr(idx_l, idx_h, idx_r, "side_r")
                         continue
                     pattern_id = f"{kind}:{idx_l}:{idx_h}:{idx_r}"
                     if pattern_id in traded or f"{kind}-head:{idx_h}" in traded:
+                        self._tr(idx_l, idx_h, idx_r, "traded")
                         continue
                     window = extreme.iloc[idx_l : idx_r + 1]
                     if bottom and float(window.min()) < price_h:
+                        self._tr(idx_l, idx_h, idx_r, "window_extreme")
                         continue
                     if not bottom and float(window.max()) > price_h:
+                        self._tr(idx_l, idx_h, idx_r, "window_extreme")
                         continue
                     neck_l = self._reaction_neck(
                         reaction_pivots, idx_l, idx_h, lowest=not bottom
@@ -474,6 +565,7 @@ class HeadShouldersStrategy:
                         reaction_pivots, idx_h, idx_r, lowest=not bottom
                     )
                     if neck_l is None or neck_r is None:
+                        self._tr(idx_l, idx_h, idx_r, "neck_none")
                         continue
                     shaped = self._shape_ok(
                         price_l,
@@ -487,6 +579,7 @@ class HeadShouldersStrategy:
                         bottom=bottom,
                     )
                     if shaped is None:
+                        self._tr(idx_l, idx_h, idx_r, "shape")
                         continue
                     if (
                         self.strict_shape
@@ -497,14 +590,29 @@ class HeadShouldersStrategy:
                         if len(gaps) and float(
                             gaps.max().total_seconds()
                         ) > self.max_bar_gap_minutes * 60:
+                            self._tr(idx_l, idx_h, idx_r, "gap")
                             continue
                     height, _neck_head = shaped
                     n1, p1 = neck_l
                     n2, p2 = neck_r
                     neck_now = self._line_at(n1, p1, n2, p2, last_idx)
-                    if best is None or height > best[0]:
+                    if (
+                        self.strict_shape
+                        and 0 < self.duration_sec <= self.session_cap_max_duration_sec
+                    ):
+                        sessions = pd.to_datetime(
+                            klines["datetime"].iloc[idx_l : last_idx + 1]
+                        ).dt.date.nunique()
+                        if sessions > self.max_span_sessions:
+                            self._tr(idx_l, idx_h, idx_r, "session")
+                            continue
+                    spread = abs(price_l - price_r)
+                    key = (height, -spread)
+                    if best is None or key > best[0]:
+                        self._tr(idx_l, idx_h, idx_r, f"selected h={height:.1f} sp={spread:.1f}")
                         best = (
-                            height,
+                            key,
+                            spread,
                             (
                                 idx_l,
                                 price_l,
@@ -521,7 +629,7 @@ class HeadShouldersStrategy:
 
         if best is None:
             return None
-        return best[1]
+        return best[2]
 
     def _neckline_for_top(
         self,
