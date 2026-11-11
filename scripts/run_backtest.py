@@ -26,7 +26,6 @@ from build_hits_gallery import build_gallery  # noqa: E402
 from core.hs_chart import render_hs_chart  # noqa: E402
 from core.hs_monitor import bars_to_strategy_df  # noqa: E402
 from core.kline_store import DURATION_LABELS, connect, load_bars  # noqa: E402
-from replay_hs_history import replay  # noqa: E402
 from replay_winrate import simulate_outcomes  # noqa: E402
 
 DEFAULT_SYMBOLS = [
@@ -46,34 +45,50 @@ DEFAULT_TFS = [60, 300, 1800, 3600, 7200, 86400]
 LOAD_DAYS = {60: 60, 300: 60, 1800: 90, 3600: 120, 7200: 150, 86400: 300}
 
 
+def _render(symbol: str, tf: int, sigs: list[dict], tdir: Path, prefix: str, conn) -> list[dict]:
+    meta = []
+    if not sigs:
+        return meta
+    tdir.mkdir(parents=True, exist_ok=True)
+    for k, s in enumerate(sigs, 1):
+        png = render_hs_chart(symbol, tf, s["when"], s["detail"], conn)
+        if not png:
+            continue
+        name = f"{prefix}_{symbol.replace('@', '_').replace('.', '')}_{k:02d}.png"
+        (tdir / name).write_bytes(png)
+        meta.append(
+            {"file": name, "symbol": symbol, "when": s["when"], "reason": s["reason"]}
+        )
+    return meta
+
+
 def _job(job: tuple[str, int, int, str]) -> dict:
     symbol, tf, days, outdir = job
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    label = DURATION_LABELS.get(tf, str(tf))
     conn = connect()
     try:
         bars = load_bars(
             conn, symbol, tf, start=datetime.now() - timedelta(days=LOAD_DAYS.get(tf, days))
         )
         if len(bars) < 120:
-            return {"tf": tf, "symbol": symbol, "loose": 0, "meta": [], "rows": []}
-        loose = sum(1 for w, _ in replay(symbol, tf, bars, False) if w >= cutoff)
+            return {
+                "tf": tf, "symbol": symbol, "loose": 0,
+                "meta": [], "kmeta": [], "rows": [],
+            }
+        loose = [s for s in replay_detail(symbol, tf, bars, False) if s["when"] >= cutoff]
         hits = [s for s in replay_detail(symbol, tf, bars, True) if s["when"] >= cutoff]
+        hit_when = {s["when"] for s in hits}
+        killed = [s for s in loose if s["when"] not in hit_when]
         rows = simulate_outcomes(symbol, tf, bars_to_strategy_df(bars), hits)
-        meta = []
-        tdir = Path(outdir) / DURATION_LABELS.get(tf, str(tf))
-        tdir.mkdir(parents=True, exist_ok=True)
-        for k, s in enumerate(hits, 1):
-            png = render_hs_chart(symbol, tf, s["when"], s["detail"], conn)
-            if not png:
-                continue
-            name = f"hit_{symbol.replace('@', '_').replace('.', '')}_{k:02d}.png"
-            (tdir / name).write_bytes(png)
-            meta.append(
-                {"file": name, "symbol": symbol, "when": s["when"], "reason": s["reason"]}
-            )
+        meta = _render(symbol, tf, hits, Path(outdir) / label, "hit", conn)
+        kmeta = _render(symbol, tf, killed, Path(outdir) / "killed" / label, "killed", conn)
     finally:
         conn.close()
-    return {"tf": tf, "symbol": symbol, "loose": loose, "meta": meta, "rows": rows}
+    return {
+        "tf": tf, "symbol": symbol, "loose": len(loose),
+        "meta": meta, "kmeta": kmeta, "rows": rows,
+    }
 
 
 def _stats(rows: list[dict]) -> dict:
@@ -138,37 +153,48 @@ def main() -> None:
         "by_tf": {},
     }
     dirs = []
+    kdirs = []
     all_rows: list[dict] = []
-    total_loose = total_strict = 0
+    total_loose = total_strict = total_killed = 0
     for tf in tfs:
         rs = [r for r in results if r["tf"] == tf]
         label = DURATION_LABELS.get(tf, str(tf))
         meta = [m for r in rs for m in r["meta"]]
+        kmeta = [m for r in rs for m in r["kmeta"]]
         rows = [row for r in rs for row in r["rows"]]
         all_rows.extend(rows)
         loose_n = sum(r["loose"] for r in rs)
         total_loose += loose_n
         total_strict += len(meta)
+        total_killed += len(kmeta)
         if meta:
             tdir = outdir / label
             (tdir / f"meta_{label}.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8"
             )
             dirs.append(tdir)
+        if kmeta:
+            kdir = outdir / "killed" / label
+            (kdir / "meta_killed.json").write_text(
+                json.dumps(kmeta, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
+            kdirs.append(kdir)
         st = _stats(rows)
         st["loose"] = loose_n
         st["strict"] = len(meta)
+        st["killed"] = len(kmeta)
         summary["by_tf"][label] = st
         wr = f"{st['win_rate']:.1%}" if st["win_rate"] is not None else "-"
         ex_ = f"{st['expectancy']:+.3f}" if st["expectancy"] is not None else "-"
         print(
-            f"[backtest] {label}: 改前 {loose_n} -> 改后 {len(meta)} | "
+            f"[backtest] {label}: 改前 {loose_n} -> 改后 {len(meta)} 滤掉 {len(kmeta)} | "
             f"胜 {st['win']} 负 {st['loss']} 超时 {st['timeout']} 胜率 {wr} 期望 {ex_}",
             flush=True,
         )
     summary["total"] = _stats(all_rows)
     summary["total"]["loose"] = total_loose
     summary["total"]["strict"] = total_strict
+    summary["total"]["killed"] = total_killed
     (outdir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8"
     )
@@ -176,7 +202,7 @@ def main() -> None:
     wr = f"{t['win_rate']:.1%}" if t["win_rate"] is not None else "-"
     ex_ = f"{t['expectancy']:+.3f}" if t["expectancy"] is not None else "-"
     print(
-        f"[backtest] 合计: 改前 {total_loose} -> 改后 {total_strict} | "
+        f"[backtest] 合计: 改前 {total_loose} -> 改后 {total_strict} 滤掉 {total_killed} | "
         f"胜 {t['win']} 负 {t['loss']} 超时 {t['timeout']} 胜率 {wr} 期望 {ex_}",
         flush=True,
     )
@@ -184,10 +210,26 @@ def main() -> None:
     labels = "/".join(DURATION_LABELS.get(tf, str(tf)) for tf in tfs)
     subtitle = (
         f"{len(symbols)} 品种 × {args.days} 天 × {labels} · v4 标定 · "
-        f"胜率 {wr} · 期望(以 swing 计) {ex_} · 生成 {summary['generated_at']}"
+        f"严格 {total_strict} / 改前 {total_loose} · 胜率 {wr} · 期望(以 swing 计) {ex_} · "
+        f"生成 {summary['generated_at']}"
     )
-    n = build_gallery(dirs, True, outdir / "gallery_single.html", subtitle)
-    print(f"[backtest] 完成：画廊 {n} 张 -> {outdir / 'gallery_single.html'}", flush=True)
+    n = build_gallery(
+        dirs, True, outdir / "gallery_single.html", subtitle,
+        nav='<a href="/backtest/killed">查看被严格闸滤掉的信号 →</a>',
+    )
+    ksub = (
+        f"{len(symbols)} 品种 × {args.days} 天 × {labels} · v4 标定 · "
+        f"改前 {total_loose} 条中滤掉 {total_killed} 条 · 生成 {summary['generated_at']}"
+    )
+    kn = build_gallery(
+        kdirs, True, outdir / "gallery_killed.html", ksub,
+        title="被滤信号", nav='<a href="/backtest">← 返回命中画廊</a>',
+    )
+    print(
+        f"[backtest] 完成：命中画廊 {n} 张 -> {outdir / 'gallery_single.html'}；"
+        f"被滤画廊 {kn} 张 -> {outdir / 'gallery_killed.html'}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
