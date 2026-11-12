@@ -26,7 +26,12 @@ from core.kline_store import (
     load_watermarks,
 )
 from core.paper_trade import PaperBroker
-from core.realtime_pipeline import TZ, _as_naive, in_trading_window
+from core.realtime_pipeline import (
+    TZ,
+    _as_naive,
+    in_trading_window,
+    session_bar_open,
+)
 
 POLL_SEC = 0.5
 IDLE_SEC = 15.0
@@ -107,9 +112,13 @@ class DbHsMonitor:
     def _prime(self, conn, symbols: list[str]) -> None:
         """启动时对齐水位，不发历史告警。"""
         marks = load_watermarks(conn, HS_MONITOR_DURATIONS, symbols)
+        now = datetime.now(TZ).replace(tzinfo=None)
         for key, dt_end in marks.items():
-            self._seen[key] = _as_naive(dt_end)
             symbol, dur = key
+            last = _as_naive(dt_end)
+            if session_bar_open(dur, last, now):
+                continue
+            self._seen[key] = last
             df = load_tf_df(symbol, dur, conn=conn)
             if df is not None and not df.empty:
                 self.engine.evaluate_df(
@@ -134,15 +143,20 @@ class DbHsMonitor:
         if self.broker is not None:
             try:
                 self.broker.retry_pending()
+                self.broker.check_loss_caps()
             except Exception:
                 traceback.print_exc()
 
         marks = load_watermarks(conn, HS_MONITOR_DURATIONS, symbols)
+        now = datetime.now(TZ).replace(tzinfo=None)
         alerts = 0
         for (symbol, dur), dt_end in marks.items():
             last = _as_naive(dt_end)
             prev = self._seen.get((symbol, dur))
             if prev is not None and last <= prev:
+                continue
+            # 半截会话 K：不告警、不开仓、也不记水位，等它真正收线
+            if session_bar_open(dur, last, now):
                 continue
             self._seen[(symbol, dur)] = last
             df = load_tf_df(symbol, dur, conn=conn)

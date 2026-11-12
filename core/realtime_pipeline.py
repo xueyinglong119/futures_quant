@@ -112,6 +112,19 @@ def in_trading_window(now: datetime) -> bool:
     return False
 
 
+def session_bar_open(duration_sec: int, last_dt: datetime, now: datetime | None = None) -> bool:
+    """会话周期的水位还没到收线时刻，说明库里这只是一根没走完的半截 K。
+
+    30m/1h 等按国内小节标注收线时刻，1m 收盘刚跨过小节起点就会写进下一根的行，
+    后面每根 1m 只就地改它的 OHLC、水位不再变化。当真 K 用会提前开仓、
+    还会让真正收线那根永远刷不出告警。
+    """
+    if duration_sec not in SESSION_BUILT_DURATIONS:
+        return False
+    wall = now if now is not None else datetime.now(TZ).replace(tzinfo=None)
+    return _as_naive(last_dt) > wall
+
+
 def _as_naive(dt: datetime) -> datetime:
     if isinstance(dt, pd.Timestamp):
         dt = dt.to_pydatetime()
@@ -625,12 +638,16 @@ class RealtimePipeline:
                 if state is None:
                     state = _SeriesState(clock="beijing")
                     self._states[(symbol, dur)] = state
-                state.frame = frame
-                state.clock = "beijing"
-                state.watermark = _as_naive(
+                last_dt = _as_naive(
                     pd.Timestamp(frame.iloc[-1]["datetime"]).to_pydatetime()
                 )
+                state.frame = frame
+                state.clock = "beijing"
                 state.last_payload = _frame_last_bar(frame)
+                # 半截会话 K 不能当水位记，否则真正收线那根永远刷不出来
+                if session_bar_open(dur, last_dt):
+                    continue
+                state.watermark = last_dt
                 self.engine._last_bar_dt[
                     self.engine._key(symbol, dur)
                 ] = state.watermark
@@ -694,6 +711,8 @@ class RealtimePipeline:
             state = _SeriesState(clock="beijing")
             self._states[(symbol, duration_sec)] = state
         last_dt = _as_naive(pd.Timestamp(frame.iloc[-1]["datetime"]).to_pydatetime())
+        if session_bar_open(duration_sec, last_dt):
+            return 0
         last_payload = _frame_last_bar(frame)
         prev_wm = state.watermark
         state.frame = frame

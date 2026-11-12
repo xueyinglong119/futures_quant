@@ -39,6 +39,8 @@ MAX_LOSS_PER_TRADE = 1_000.0
 # 开盘瞬间行情连接未就绪时取不到合约资料，信号先挂起，每 10 秒重试，最多 5 分钟
 PENDING_RETRY_SEC = 10.0
 PENDING_TTL_SEC = 300.0
+# 浮亏上限的实时盯盘间隔：会话 K 要等收线才推进，止损不能只挂在 K 线水位上
+CAP_CHECK_SEC = 10.0
 # 小于这个数时，交易所字段更像成交额费率，而不是每手元
 _RATIO_CEILING = 0.02
 
@@ -316,6 +318,7 @@ class PaperBroker:
         self.cash = INITIAL_CASH
         self._open: dict[tuple[str, int], OpenPosition] = {}
         self._pending: dict[tuple[str, int], PendingEntry] = {}
+        self._last_cap_check = 0.0
         ensure_schema(conn)
         self._load()
 
@@ -504,6 +507,35 @@ class PaperBroker:
         if hit is None:
             return None
         return f"止损(浮亏超{MAX_LOSS_PER_TRADE:.0f})", hit[1]
+
+    def check_loss_caps(self) -> int:
+        """按最新入库价实时了结浮亏超限的持仓，返回平仓笔数。
+
+        `on_bar` 只在 K 线水位前进时被调用，会话周期一根要等几十分钟才收线，
+        期间浮亏早已越界却没人平仓，所以金额止损必须脱离 K 线单独盯。
+        """
+        now_mono = time.monotonic()
+        if now_mono - self._last_cap_check < CAP_CHECK_SEC:
+            return 0
+        self._last_cap_check = now_mono
+        self._sync_from_db()
+        if not self._open:
+            return 0
+        wall = datetime.now(SHANGHAI).replace(tzinfo=None, microsecond=0)
+        closed = 0
+        for pos in list(self._open.values()):
+            mark = latest_mark_price(self.conn, pos.symbol, pos.duration_sec)
+            if mark is None or mark <= 0:
+                continue
+            if mark != pos.last_price:
+                pos.last_price = mark
+                self._update_last_price(pos)
+            pnl = price_pnl(pos.side, pos.open_price, mark, pos.multiplier, pos.lots)
+            if pnl > -MAX_LOSS_PER_TRADE:
+                continue
+            self._close_trade(pos, wall, f"止损(浮亏超{MAX_LOSS_PER_TRADE:.0f})", mark)
+            closed += 1
+        return closed
 
     def snapshot(self) -> dict[str, Any]:
         return account_snapshot(self.conn)
