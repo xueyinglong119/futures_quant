@@ -62,14 +62,17 @@ def _render(symbol: str, tf: int, sigs: list[dict], tdir: Path, prefix: str, con
     return meta
 
 
-def _job(job: tuple[str, int, int, str, bool, int]) -> dict:
-    symbol, tf, days, outdir, allow_gap, pivot_order = job
+def _job(job: tuple[str, int, int, str, bool, int, int]) -> dict:
+    symbol, tf, days, outdir, allow_gap, pivot_order, load_days = job
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     label = DURATION_LABELS.get(tf, str(tf))
     conn = connect()
     try:
         bars = load_bars(
-            conn, symbol, tf, start=datetime.now() - timedelta(days=LOAD_DAYS.get(tf, days))
+            conn,
+            symbol,
+            tf,
+            start=datetime.now() - timedelta(days=load_days or LOAD_DAYS.get(tf, days)),
         )
         if len(bars) < 120:
             return {
@@ -142,6 +145,12 @@ def main() -> None:
         default="",
         help="回测对比用：如 300:1 表示 5m 拐点只要求左右各 1 根（实盘口径不变）",
     )
+    ap.add_argument(
+        "--load-days",
+        type=int,
+        default=0,
+        help="回测对比用：覆盖各周期固定预热窗口（0=按 LOAD_DAYS）。确认根数调小后成本随根数三次方涨，需要时用它缩窗口",
+    )
     ap.add_argument("--outdir", type=str, default="")
     args = ap.parse_args()
 
@@ -172,7 +181,7 @@ def main() -> None:
     outdir.mkdir(parents=True, exist_ok=True)
 
     jobs = [
-        (s, tf, args.days, str(outdir), args.allow_session_gap, pivots.get(tf, 0))
+        (s, tf, args.days, str(outdir), args.allow_session_gap, pivots.get(tf, 0), args.load_days)
         for tf in tfs
         for s in symbols
     ]
@@ -182,6 +191,7 @@ def main() -> None:
     )
     print(
         f"[backtest] 品种 {len(symbols)} × 周期 {tfs} × {args.days} 天，"
+        f"预热 {args.load_days or '按周期'} 天，"
         f"workers={args.workers}，作业 {len(jobs)}，"
         f"跨断点={'放开(仅回测)' if args.allow_session_gap else '按实盘'}，"
         f"枢轴={piv_desc}{'(仅回测)' if pivots else ''}",
@@ -204,7 +214,8 @@ def main() -> None:
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "days": args.days,
         "load_days": {
-            DURATION_LABELS.get(tf, str(tf)): LOAD_DAYS.get(tf, args.days) for tf in tfs
+            DURATION_LABELS.get(tf, str(tf)): args.load_days or LOAD_DAYS.get(tf, args.days)
+            for tf in tfs
         },
         "symbols": symbols,
         "tfs": tfs,
