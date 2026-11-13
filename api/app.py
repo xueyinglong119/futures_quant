@@ -260,6 +260,22 @@ def backtest_pivot_killed_page() -> FileResponse:
     return FileResponse(page, media_type="text/html")
 
 
+@app.get("/backtest/neck")
+def backtest_neck_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_neck" / "gallery_single.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="颈线穿透闸回测尚未生成（reports/backtest_neck/gallery_single.html 不存在）")
+    return FileResponse(page, media_type="text/html")
+
+
+@app.get("/backtest/neck/killed")
+def backtest_neck_killed_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_neck" / "gallery_killed.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="颈线穿透闸被滤画廊尚未生成（reports/backtest_neck/gallery_killed.html 不存在）")
+    return FileResponse(page, media_type="text/html")
+
+
 @app.get("/alerts")
 def alerts_page() -> FileResponse:
     page = WEB_DIR / "alerts.html"

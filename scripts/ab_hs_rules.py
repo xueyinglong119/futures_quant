@@ -90,6 +90,15 @@ def _shape_ok(self, *a, **kw):
             return None
         if abs(p1 - p2) > self.max_neck_slope_ratio * abs(neck_head):
             return None
+        if MODE["gate"] != 0.4:
+            closes = kw.get("closes")
+            if closes is not None:
+                tol = 0.1 * height
+                for i in range(n1, n2 + 1):
+                    line = self._line_at(n1, p1, n2, p2, i)
+                    c = float(closes.iloc[i])
+                    if (bottom and c > line + tol) or (not bottom and c < line - tol):
+                        return None
     return height, neck_head
 
 

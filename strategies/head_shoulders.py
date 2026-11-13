@@ -272,6 +272,7 @@ class HeadShouldersStrategy:
         neck_r: tuple[int, float],
         *,
         bottom: bool,
+        closes: pd.Series | None = None,
     ) -> tuple[float, float] | None:
         """返回 (头部高度, 突破当下的颈线价)。对不上形态图就返回 None。"""
         n1, p1 = neck_l
@@ -303,6 +304,14 @@ class HeadShouldersStrategy:
                 return None
             if abs(p1 - p2) > self.max_neck_slope_ratio * abs(neck_head):
                 return None
+            if closes is not None:
+                # 颈线被收盘价穿透说明锚点没取到真正的反弹极值，形态不成立
+                tol = 0.1 * height
+                for i in range(n1, n2 + 1):
+                    line = self._line_at(n1, p1, n2, p2, i)
+                    c = float(closes.iloc[i])
+                    if (bottom and c > line + tol) or (not bottom and c < line - tol):
+                        return None
         return height, neck_head
 
     def _register_short(self, symbol: str, price_h: float, neck: float) -> None:
@@ -597,6 +606,7 @@ class HeadShouldersStrategy:
                         neck_l,
                         neck_r,
                         bottom=bottom,
+                        closes=pts,
                     )
                     if shaped is None:
                         self._tr(idx_l, idx_h, idx_r, "shape")
