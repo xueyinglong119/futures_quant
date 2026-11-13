@@ -60,6 +60,10 @@ Compose 拆成三个容器（同一镜像）：
 
 改策略只重启 `futures-monitor` 即可，不必重订行情。告警在 `data/alerts.json`，App 地址：`http://ECS公网IP:8000`。
 
+**但改代码本身必须先重建镜像**（源码 `COPY` 进镜像，`git pull` + `restart` 不生效），且服务名要显式列全、不带 `futures-backtest`：
+`docker compose up -d --build futures-api futures-ingest futures-monitor`。
+头肩规则现口径、回测/A/B 的服务器跑法与运维坑见 [HS_RULES.md](HS_RULES.md)。
+
 本机试跑监控：
 
 ```bash
