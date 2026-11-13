@@ -37,7 +37,7 @@ class HeadShouldersStrategy:
     头肩顶 / 头肩底。
 
     头是区间里的极值。一边可以有两个肩，取其中能和另一边配成形态的那一对。
-    颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的一半。
+    颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的 1/4。
     形态点位（肩、头、颈线拐点）一律按收盘价量，蜡烛高低点只用于风控摆动。
     两肩都要明显离开颈线（≥0.3×形态高度）。右肩就是当前这根 K 线即出告警/开仓，
     不必等破颈线，也不再多走 pivot_order 根确认。
@@ -283,7 +283,8 @@ class HeadShouldersStrategy:
             return None
         if height / abs(price_h) < self.min_head_neck_ratio:
             return None
-        if abs(p1 - p2) > 0.5 * height:
+        # 锚点落在单边急跌/急拉远端时颈线会贴着趋势走，斜率超过 1/4 头高即不成立
+        if abs(p1 - p2) > 0.25 * height:
             return None
         if bottom:
             if price_l - price_h < 0.25 * height or price_r - price_h < 0.25 * height:

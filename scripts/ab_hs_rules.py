@@ -67,7 +67,8 @@ def _shape_ok(self, *a, **kw):
         return None
     if height / abs(price_h) < self.min_head_neck_ratio:
         return None
-    if abs(p1 - p2) > 0.5 * height:
+    slope_cap = 0.5 if MODE["gate"] == 0.4 else 0.25
+    if abs(p1 - p2) > slope_cap * height:
         return None
     if bottom:
         if price_l - price_h < 0.25 * height or price_r - price_h < 0.25 * height:
