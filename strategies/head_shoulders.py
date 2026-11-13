@@ -431,8 +431,8 @@ class HeadShouldersStrategy:
         *,
         lowest: bool,
     ) -> tuple[int, float] | None:
-        """肩和头之间的颈线拐点，必须离开两端至少一根拐点宽度。"""
-        gap = self.pivot_order
+        """肩和头之间的颈线拐点，离开两端各至少一根即可。"""
+        gap = 1
         inside = [p for p in reaction_pivots if i0 + gap <= p[0] <= i1 - gap]
         if not inside:
             return None
