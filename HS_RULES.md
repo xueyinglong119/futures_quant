@@ -28,6 +28,7 @@
 - **烧碱 1573 顶（30m）**：点位改收盘价后唯一卡它的就是肩离颈那道闸（11.9 vs 需 12.2，差 0.3），0.3× 能过、0.4× 过不了。当根告警口径下它的首次成立时点是 **2026-11-12 14:15**（右 1551 / 颈 1541），而不是旧口径的 11-13 09:30（右 1549 / 颈 1536）——先满足条件的那根拿到去重槽位。
 - **加载窗不够会让周期被静默跳过**：60 天加载窗 ≈37 个交易日，SH 每天约 345 个 1m 分钟 → 30m 约 426 根、1h 约 213 根、**2h 约 107 根**，低于 `ab_hs_rules.py` 的 200 根下限就不出数；中金所品种只有日盘，1h 也会缺。看到某周期整列缺失先按这个算，别当成 bug。
 - `datetime_end` 字段对 raw 周期（1m/3m/5m/10m/15m）其实是**起始**时刻，只有会话合成周期（30m/1h/2h/3h/4h）才是结束时刻。跨周期对齐时务必注意。
+- **30 天 A/B 两片合计（89 品种，2026-11-13 裁决用）**：30m 全品种 OLD 53 条胜率 23.5% / NEW 98 条 20.2%；仅监控 41 品种 OLD 37 条 25.0% / NEW 55 条 21.2%；1h 全品种 OLD 4 条 25.0% / NEW 20 条 15.8%（监控子集 NEW 13 条 8.3%）。以 ±0.8/0.2 swing 计盈亏平衡胜率是 20%：NEW 在 1h 已跌破、30m 仅贴着，期望 OLD +0.035~+0.05 vs NEW +0.002~+0.012。**结论：NEW（收盘价点位+当根告警+0.3h）暂不部署**。该轮输出按右肩下标认重合（30m 仅 1 条），可能是键的伪影；重合键已改为头的全局下标，需重跑确认「提前告警」还是「换了一批信号」。2h 该轮整列缺失（加载窗不足），需 `HS_AB_LOAD_DAYS=150` 补跑。
 
 ## 3. 全量回测 / A/B：只在服务器上跑
 
@@ -49,9 +50,9 @@ docker run -d --rm --name ab_hs_0 --env-file .env -e HS_AB_SHARD=0/2 -e HS_AB_TF
 docker run -d --rm --name ab_hs_1 --env-file .env -e HS_AB_SHARD=1/2 -e HS_AB_TFS=30m,1h,2h -e HS_AB_OUT=/app/reports/ab_hs_1.txt -v $PWD/reports:/app/reports futures-quant-api python -u scripts/ab_hs_rules.py
 ```
 
-- 环境变量：`HS_AB_SHARD=k/n` 分片、`HS_AB_TFS` 周期（默认 `30m,1h`）、`HS_AB_SYMBOLS` 指定品种、`HS_AB_OUT` 输出、`HS_AB_DUMP=1` 逐条列告警。
+- 环境变量：`HS_AB_SHARD=k/n` 分片、`HS_AB_TFS` 周期（默认 `30m,1h`）、`HS_AB_SYMBOLS` 指定品种、`HS_AB_LOAD_DAYS` 1m 加载窗（默认 60，跑 2h 用 150）、`HS_AB_OUT` 输出、`HS_AB_DUMP=1` 逐条列告警。
 - 命令**写成单行，别用反斜杠续行**——粘进那台终端会被截断成 `-bash: ocker: command not found`。
-- 输出：逐品种行 `30m OLD=a NEW=b 同x 新y 旧z 早N根 胜/负 w/l->w/l`（同=两口径都有的形态，新/旧=只有一边有，早=同形态改后提前几根），片尾各带「全品种」「仅监控 41 品种」合计。
+- 输出：逐品种行 `30m OLD=a NEW=b 同x 新y 旧z 早N根 胜/负 w/l->w/l`（同=同一个头两口径都告警，新/旧=只有一边有，早=同头改后提前几根），片尾各带「全品种」「仅监控 41 品种」合计。
 - 进度/ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完成 %d 个，平均 %.0f 秒/个，两片并行剩余约 %.0f 分钟\n", n, s/n, (89-n)/2*s/n/60}' reports/ab_hs_0.txt reports/ab_hs_1.txt`。这个外推是**线性下限，实际要 ×2**（两片抢 2 核 + 云盘）。
 - 容器 `Up ... (unhealthy)` 是镜像 healthcheck 在探 `:8000/health`，跑脚本的容器不起 HTTP，**必红，不是挂了**，别 stop。
 - 拆片前先 `docker stats --no-stream` 看内存；2C2G 上两片并行约 112MiB/片，安全。
@@ -71,7 +72,7 @@ docker run -d --rm --name ab_hs_1 --env-file .env -e HS_AB_SHARD=1/2 -e HS_AB_TF
 ## 5. 未闭环事项
 
 - **③ 肩离颈 0.3× 是保留还是整条去掉**：用户原话是「这个距离的限制也去掉」，当前实现保守取了 0.3×。A/B 已加第三变体 NOGATE（NEW 口径去掉肩离颈闸），等 `reports/ab_hs_0.txt` + `ab_hs_1.txt` 三列的胜率和条数再裁决。
-- **①② 的全量裁决**：同样等上面两片数据（收盘价点位 / 右肩当根即告警）。
+- **①② 的全量裁决**：30 天两片已跑（见 §2 末条），NEW 胜率不占优、1h 跌破盈亏平衡，**暂不部署**；最终裁决等 NOGATE 三变体 + `HS_AB_LOAD_DAYS=150` 补 2h + 头索引重合键的重跑。
 - **数据修复**：11-06～11-10 的 30m/1h/2h/3h/4h 会话周期需回填——
   `docker compose run --rm --no-deps futures-ingest python -u scripts/rebuild_session_klines.py --all --start 2026-11-06 --end 2026-11-10`，确认输出无误后加 `--execute`；1d 的 11-06 另修。
 - **开仓时点**：一年基线和 30 天贴收盘（仅 2 条样本、竞价逆向选择）都**否定**了抢收盘跳空，strict 样本极小，规则未改。

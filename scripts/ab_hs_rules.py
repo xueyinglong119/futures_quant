@@ -6,7 +6,7 @@ vs 去肩离颈（改后口径但完全去掉肩离颈闸，裁决「0.3h 保留
   docker run -d --rm -e HS_AB_SHARD=0/2 -e HS_AB_OUT=/app/reports/ab_hs_0.txt \
     -v $PWD/reports:/app/reports futures-quant-api python -u scripts/ab_hs_rules.py
 环境变量：HS_AB_SHARD=k/n 分片；HS_AB_TFS=30m,1h 周期；HS_AB_SYMBOLS=a,b 指定品种；
-HS_AB_DUMP=1 逐条列出告警。
+HS_AB_LOAD_DAYS=N 1m 加载窗（默认 60，跑 2h 用 150）；HS_AB_DUMP=1 逐条列出告警。
 """
 
 from __future__ import annotations
@@ -40,7 +40,8 @@ SESSION_TFS = tuple(
     s.strip() for s in os.environ.get("HS_AB_TFS", "30m,1h").split(",") if s.strip()
 )
 DAYS = 30
-LOAD_DAYS = 60
+# 2h 在 60 天加载窗下只有约 107 根，低于 200 根下限会整列缺失；跑 2h 用 HS_AB_LOAD_DAYS=150
+LOAD_DAYS = int(os.environ.get("HS_AB_LOAD_DAYS", "60"))
 OUT = ROOT / os.environ.get("HS_AB_OUT", "reports/ab_hs_rules.txt")
 DUMP = bool(os.environ.get("HS_AB_DUMP"))
 
@@ -171,6 +172,7 @@ def replay(symbol: str, tf: int, dicts: list[dict], cutoff: str) -> list[dict]:
                         "when": when,
                         "i": i,
                         "rgi": max(0, i - window) + int((sig.detail or {}).get("right_idx", -1)),
+                        "hgi": max(0, i - window) + int((sig.detail or {}).get("head_idx", -1)),
                         "side": (sig.detail or {}).get("side", ""),
                         "reason": sig.reason,
                         "detail": getattr(sig, "detail", None) or {},
@@ -265,13 +267,14 @@ for symbol in SYMBOLS:
             set_variant("NEW 改后")
 
             def pkey(s):
-                return (s["side"], s["rgi"])
+                # 按头的全局下标认同一形态：两口径选的右肩根可能差几根
+                return (s["side"], s["hgi"])
 
             ko = {pkey(s) for s in got["OLD 改前"]}
             kn = {pkey(s) for s in got["NEW 改后"]}
             kg = {pkey(s) for s in got["NOGATE 去肩离颈"]}
             at_new = {pkey(s): s["i"] for s in got["NEW 改后"]}
-            # 同一右肩：改后在这根告警、改前要再等 4 根，差值即提前根数
+            # 同一个头：改后在这根告警、改前要再等 4 根，差值即提前根数
             lead = [s["i"] - at_new[pkey(s)] for s in got["OLD 改前"] if pkey(s) in kn]
             if DUMP:
                 for name in VARIANTS:
