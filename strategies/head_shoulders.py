@@ -69,6 +69,7 @@ class HeadShouldersStrategy:
         session_cap_max_duration_sec: int = 7200,
         max_bar_gap_minutes: float = 130.0,
         gap_rule_max_duration_sec: int = 900,
+        shoulder_prominence_ratio: float = 0.25,
     ):
         self.pivot_order = pivot_order
         self.shoulder_tolerance = shoulder_tolerance
@@ -89,6 +90,7 @@ class HeadShouldersStrategy:
         self.session_cap_max_duration_sec = session_cap_max_duration_sec
         self.max_bar_gap_minutes = max_bar_gap_minutes
         self.gap_rule_max_duration_sec = gap_rule_max_duration_sec
+        self.shoulder_prominence_ratio = shoulder_prominence_ratio
         self._traded_patterns: dict[str, set[str]] = {}
         self._active_trades: dict[str, _ActiveTrade] = {}
         self.trace: bool = False
@@ -286,10 +288,11 @@ class HeadShouldersStrategy:
         # 锚点落在单边急跌/急拉远端时颈线会贴着趋势走，斜率超过 1/4 头高即不成立
         if abs(p1 - p2) > 0.25 * height:
             return None
+        prom = self.shoulder_prominence_ratio
         if bottom:
-            if price_l - price_h < 0.25 * height or price_r - price_h < 0.25 * height:
+            if price_l - price_h < prom * height or price_r - price_h < prom * height:
                 return None
-        elif price_h - price_l < 0.25 * height or price_h - price_r < 0.25 * height:
+        elif price_h - price_l < prom * height or price_h - price_r < prom * height:
             return None
         if abs(price_l - price_r) > 0.5 * height:
             return None

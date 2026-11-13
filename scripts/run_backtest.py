@@ -62,8 +62,8 @@ def _render(symbol: str, tf: int, sigs: list[dict], tdir: Path, prefix: str, con
     return meta
 
 
-def _job(job: tuple[str, int, int, str, bool, int, int]) -> dict:
-    symbol, tf, days, outdir, allow_gap, pivot_order, load_days = job
+def _job(job: tuple[str, int, int, str, bool, int, int, float]) -> dict:
+    symbol, tf, days, outdir, allow_gap, pivot_order, load_days, prominence = job
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     label = DURATION_LABELS.get(tf, str(tf))
     conn = connect()
@@ -82,7 +82,9 @@ def _job(job: tuple[str, int, int, str, bool, int, int]) -> dict:
         loose = [
             s
             for s in replay_detail(
-                symbol, tf, bars, False, pivot_order=pivot_order or None
+                symbol, tf, bars, False,
+                pivot_order=pivot_order or None,
+                prominence=prominence or None,
             )
             if s["when"] >= cutoff
         ]
@@ -95,6 +97,7 @@ def _job(job: tuple[str, int, int, str, bool, int, int]) -> dict:
                 True,
                 allow_session_gap=allow_gap,
                 pivot_order=pivot_order or None,
+                prominence=prominence or None,
             )
             if s["when"] >= cutoff
         ]
@@ -151,8 +154,17 @@ def main() -> None:
         default=0,
         help="回测对比用：覆盖各周期固定预热窗口（0=按 LOAD_DAYS）。确认根数调小后成本随根数三次方涨，需要时用它缩窗口",
     )
+    ap.add_argument(
+        "--prominence",
+        type=float,
+        default=0.0,
+        help="回测对比用：肩突出门槛占头高比例（0=按实盘 0.25）。如 0.2 放宽到 0.2×头高（实盘口径不变）",
+    )
     ap.add_argument("--outdir", type=str, default="")
     args = ap.parse_args()
+
+    if args.prominence < 0:
+        ap.error("--prominence 不能为负（0=按实盘 0.25）")
 
     tfs = [int(x) for x in args.tfs.split(",") if x.strip()]
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
@@ -173,7 +185,11 @@ def main() -> None:
             / (
                 "backtest_pivot"
                 if pivots
-                else ("backtest_gap" if args.allow_session_gap else "backtest")
+                else (
+                    "backtest_gap"
+                    if args.allow_session_gap
+                    else ("backtest_prom" if args.prominence else "backtest")
+                )
             )
         )
     )
@@ -181,7 +197,10 @@ def main() -> None:
     outdir.mkdir(parents=True, exist_ok=True)
 
     jobs = [
-        (s, tf, args.days, str(outdir), args.allow_session_gap, pivots.get(tf, 0), args.load_days)
+        (
+            s, tf, args.days, str(outdir), args.allow_session_gap,
+            pivots.get(tf, 0), args.load_days, args.prominence,
+        )
         for tf in tfs
         for s in symbols
     ]
@@ -194,7 +213,8 @@ def main() -> None:
         f"预热 {args.load_days or '按周期'} 天，"
         f"workers={args.workers}，作业 {len(jobs)}，"
         f"跨断点={'放开(仅回测)' if args.allow_session_gap else '按实盘'}，"
-        f"枢轴={piv_desc}{'(仅回测)' if pivots else ''}",
+        f"枢轴={piv_desc}{'(仅回测)' if pivots else ''}，"
+        f"肩突出={args.prominence or 0.25:g}h{'(仅回测)' if args.prominence else ''}",
         flush=True,
     )
 
@@ -221,6 +241,7 @@ def main() -> None:
         "tfs": tfs,
         "allow_session_gap": args.allow_session_gap,
         "pivot_overrides": {DURATION_LABELS.get(k, str(k)): v for k, v in pivots.items()},
+        "shoulder_prominence_ratio": args.prominence or 0.25,
         "by_tf": {},
     }
     dirs = []
@@ -282,13 +303,19 @@ def main() -> None:
     base = (
         "/backtest/pivot"
         if pivots
-        else ("/backtest/gap" if args.allow_session_gap else "/backtest")
+        else (
+            "/backtest/gap"
+            if args.allow_session_gap
+            else ("/backtest/prom" if args.prominence else "/backtest")
+        )
     )
     mods = []
     if pivots:
         mods.append(f"枢轴{piv_desc}")
     if args.allow_session_gap:
         mods.append("放开跨断点")
+    if args.prominence:
+        mods.append(f"肩突出{args.prominence:g}h")
     tag = "v4 标定" + (f" · {' / '.join(mods)}(仅回测)" if mods else "")
     subtitle = (
         f"{len(symbols)} 品种 × {args.days} 天 × {labels} · {tag} · "
