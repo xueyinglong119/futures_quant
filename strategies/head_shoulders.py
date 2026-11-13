@@ -38,12 +38,14 @@ class HeadShouldersStrategy:
 
     头是区间里的极值。一边可以有两个肩，取其中能和另一边配成形态的那一对。
     颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的一半。
-    两肩都要明显离开颈线。右肩拐点确认（再走出 pivot_order 根）即告警/开仓，不必等破颈线。
+    形态点位（肩、头、颈线拐点）一律按收盘价量，蜡烛高低点只用于风控摆动。
+    两肩都要明显离开颈线（≥0.3×形态高度）。右肩就是当前这根 K 线即出告警/开仓，
+    不必等破颈线，也不再多走 pivot_order 根确认。
     strict_shape 质量闸：左右肩价差≤颈线1.5%、颈线斜率≤0.5%、≤2h 周期形态跨度≤5 个交易日、
     ≤15m 周期形态内相邻 K 线间隙>130 分钟（跨收盘/夜盘）即拒；
     同高度候选三元组取两肩价差最小者（经典对称本义）。
-    肩部主导性：左肩须为其与头之间同向拐点极端；右肩另须为确认窗内外侧极端
-    （其后 2×pivot_order 根内不得出现更极端的同向拐点）。
+    肩部主导性：左肩须为其与头之间同向拐点极端；右肩之后若走出更极端的同向拐点，
+    该形态在后续 K 线上自然不再成立。
     """
 
     def __init__(
@@ -103,8 +105,10 @@ class HeadShouldersStrategy:
         if len(klines) < min_len:
             return None
 
-        pivot_highs = self._find_pivot_highs(klines.high)
-        pivot_lows = self._find_pivot_lows(klines.low)
+        highs = self._pivot_series(klines, is_high=True)
+        lows = self._pivot_series(klines, is_high=False)
+        pivot_highs = self._with_tail_pivot(self._find_pivot_highs(highs), highs, is_high=True)
+        pivot_lows = self._with_tail_pivot(self._find_pivot_lows(lows), lows, is_high=False)
         traded = self._traded_patterns.setdefault(symbol, set())
 
         top_signal = self._detect_head_shoulders_top(
@@ -171,6 +175,10 @@ class HeadShouldersStrategy:
 
         return None
 
+    def _pivot_series(self, klines: pd.DataFrame, *, is_high: bool) -> pd.Series:
+        """形态点位（肩、头、颈线拐点）按收盘价量；蜡烛高低点只留给风控摆动。"""
+        return klines.close
+
     def _find_pivot_highs(self, series: pd.Series) -> list[tuple[int, float]]:
         order = self.pivot_order
         pivots: list[tuple[int, float]] = []
@@ -195,13 +203,29 @@ class HeadShouldersStrategy:
                     pivots.append((i, val))
         return pivots
 
+    def _with_tail_pivot(
+        self, pivots: list[tuple[int, float]], series: pd.Series, *, is_high: bool
+    ) -> list[tuple[int, float]]:
+        """当前这根只要盖过前 pivot_order 根就算拐点——右肩当根即出告警，不等 4 根。"""
+        order = self.pivot_order
+        i = len(series) - 1
+        if i < order:
+            return pivots
+        val = float(series.iloc[i])
+        left = series.iloc[i - order : i]
+        if is_high and val > float(left.max()):
+            pivots.append((i, val))
+        elif not is_high and val < float(left.min()):
+            pivots.append((i, val))
+        return pivots
+
     def _shoulders_balanced(self, left: float, right: float, reference: float) -> bool:
         if reference == 0:
             return False
         return abs(left - right) / abs(reference) <= self.shoulder_tolerance
 
     def _right_shoulder_confirmed(self, idx_r: int, last_idx: int) -> bool:
-        return last_idx >= idx_r + self.pivot_order
+        return idx_r == last_idx
 
     def _level_neck(self, left_anchor: float, right_anchor: float) -> float | None:
         """颈线两端要大致一样高，和形态图里的水平颈线一致。"""
@@ -270,9 +294,9 @@ class HeadShouldersStrategy:
         neck_at_l = self._line_at(n1, p1, n2, p2, idx_l)
         neck_at_r = self._line_at(n1, p1, n2, p2, idx_r)
         if bottom:
-            if neck_at_l - price_l < 0.4 * height or neck_at_r - price_r < 0.4 * height:
+            if neck_at_l - price_l < 0.3 * height or neck_at_r - price_r < 0.3 * height:
                 return None
-        elif price_l - neck_at_l < 0.4 * height or price_r - neck_at_r < 0.4 * height:
+        elif price_l - neck_at_l < 0.3 * height or price_r - neck_at_r < 0.3 * height:
             return None
         if self.strict_shape:
             if abs(price_l - price_r) > self.max_shoulder_spread_ratio * abs(neck_head):
@@ -365,7 +389,7 @@ class HeadShouldersStrategy:
             },
         )
         return self._register_pending(
-            signal, symbol, pattern_id, f"top-head:{idx_h}", "short",
+            signal, symbol, pattern_id, f"top-head:{head_time}", "short",
             price_h, neck, traded,
         )
 
@@ -419,7 +443,7 @@ class HeadShouldersStrategy:
             },
         )
         return self._register_pending(
-            signal, symbol, pattern_id, f"bottom-head:{idx_h}", "long",
+            signal, symbol, pattern_id, f"bottom-head:{head_time}", "long",
             price_h, neck, traded,
         )
 
@@ -457,9 +481,9 @@ class HeadShouldersStrategy:
         """本根刚好确认右肩的形态里，取头部幅度最大的那一个（不必破颈线）。"""
         if len(pivots) < 3 or len(klines) < 2:
             return None
-        closes = klines.close
-        last_idx = len(closes) - 1
-        extreme = klines.low if bottom else klines.high
+        pts = self._pivot_series(klines, is_high=not bottom)
+        last_idx = len(klines) - 1
+        extreme = pts
         best: tuple[float, tuple] | None = None
         if self.trace:
             self.last_trace = []
@@ -494,36 +518,27 @@ class HeadShouldersStrategy:
                         if bottom:
                             dominated = any(
                                 p < price_l
-                                and float(klines.high.iloc[idx_l : ip].max()) - price_l
+                                and float(pts.iloc[idx_l : ip].max()) - price_l
                                 >= self.dominance_reaction_ratio * dref
                                 for ip, p in between_l
                             ) or any(
                                 p < price_r
-                                and float(klines.high.iloc[ip : idx_r].max()) - price_r
+                                and float(pts.iloc[ip : idx_r].max()) - price_r
                                 >= self.dominance_reaction_ratio * dref
                                 for ip, p in between_r
                             )
                         else:
                             dominated = any(
                                 p > price_l
-                                and price_l - float(klines.low.iloc[idx_l : ip].min())
+                                and price_l - float(pts.iloc[idx_l : ip].min())
                                 >= self.dominance_reaction_ratio * dref
                                 for ip, p in between_l
                             ) or any(
                                 p > price_r
-                                and price_r - float(klines.low.iloc[ip : idx_r].min())
+                                and price_r - float(pts.iloc[ip : idx_r].min())
                                 >= self.dominance_reaction_ratio * dref
                                 for ip, p in between_r
                             )
-                        outer = [
-                            p
-                            for p in pivots[ri + 1 :]
-                            if p[0] <= idx_r + 2 * self.pivot_order
-                        ]
-                        if bottom:
-                            dominated = dominated or any(p < price_r for _, p in outer)
-                        else:
-                            dominated = dominated or any(p > price_r for _, p in outer)
                         if dominated:
                             self._tr(idx_l, idx_h, idx_r, "dominated")
                             continue
@@ -537,8 +552,8 @@ class HeadShouldersStrategy:
                     if idx_r - idx_h < self.pivot_order:
                         self._tr(idx_l, idx_h, idx_r, "order_r")
                         continue
-                    # 仅在右肩「刚刚」确认的那一根告警，避免事后补推旧形态
-                    if last_idx != idx_r + self.pivot_order:
+                    # 右肩就是当前这根才告警，避免事后补推旧形态
+                    if not self._right_shoulder_confirmed(idx_r, last_idx):
                         self._tr(idx_l, idx_h, idx_r, "trigger")
                         continue
                     if bottom and price_r <= price_h:
@@ -547,8 +562,13 @@ class HeadShouldersStrategy:
                     if not bottom and price_r >= price_h:
                         self._tr(idx_l, idx_h, idx_r, "side_r")
                         continue
-                    pattern_id = f"{kind}:{idx_l}:{idx_h}:{idx_r}"
-                    if pattern_id in traded or f"{kind}-head:{idx_h}" in traded:
+                    # 窗口在滑，相对下标每根都会变，去重必须用 K 线时刻
+                    head_time = _format_bar_time(klines.iloc[idx_h]["datetime"])
+                    pattern_id = (
+                        f"{kind}:{_format_bar_time(klines.iloc[idx_l]['datetime'])}"
+                        f":{head_time}:{_format_bar_time(klines.iloc[idx_r]['datetime'])}"
+                    )
+                    if pattern_id in traded or f"{kind}-head:{head_time}" in traded:
                         self._tr(idx_l, idx_h, idx_r, "traded")
                         continue
                     window = extreme.iloc[idx_l : idx_r + 1]

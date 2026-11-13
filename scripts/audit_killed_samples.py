@@ -35,19 +35,15 @@ def replay_detail(
         strat.max_bar_gap_minutes = float("inf")
     df_all = bars_to_strategy_df(bars)
     window = TF_CONFIGS[duration_sec].lookback_bars if duration_sec in TF_CONFIGS else 400
-    min_len = strat.max_span_bars + strat.pivot_order * 2 + 5
+    order = strat.pivot_order
+    min_len = strat.max_span_bars + order * 2 + 5
+    pts = strat._pivot_series(df_all, is_high=True)
     out = []
     for i in range(min_len - 1, len(df_all)):
-        j = i - strat.pivot_order
-        seg_ok = False
-        for series in (df_all.low, df_all.high):
-            if j - strat.pivot_order >= 0 and j + strat.pivot_order < len(series):
-                seg = series.iloc[j - strat.pivot_order : j + strat.pivot_order + 1]
-                v = series.iloc[j]
-                if v == seg.min() or v == seg.max():
-                    seg_ok = True
-                    break
-        if not seg_ok:
+        # 预过滤：右肩就是当前这根，只有盖过前 order 根的 K 线才可能告警
+        v = float(pts.iloc[i])
+        left = pts.iloc[i - order : i]
+        if not (v > float(left.max()) or v < float(left.min())):
             continue
         win = df_all.iloc[max(0, i - window) : i + 1]
         sig = strat.on_bar(win, symbol=symbol)

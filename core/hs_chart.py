@@ -116,7 +116,7 @@ def render_hs_chart(
     nl = _index_of(times, _parse_detail_time(detail.get("neck_l_time"), ref))
     nr = _index_of(times, _parse_detail_time(detail.get("neck_r_time"), ref))
     if nl is not None and nr is not None and nr > nl:
-        pick = "low" if side == "short" else "high"
+        pick = "close"
         ax.plot(
             [nl, nr],
             [bars[nl][pick], bars[nr][pick]],
