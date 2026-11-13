@@ -1,5 +1,6 @@
 """全品种头肩规则 A/B：改前（高低点拐点 + 0.4h 肩离颈 + 等 4 根）
-vs 改后（收盘价点位 + 0.3h 肩离颈 + 右肩当根即告警）。
+vs 改后（收盘价点位 + 0.3h 肩离颈 + 右肩当根即告警）
+vs 去肩离颈（改后口径但完全去掉肩离颈闸，裁决「0.3h 保留还是整条去掉」）。
 
 会话周期用库内 1m 现场重算，避开 11-06/09/10 的洞。在回测机上跑，2 核就分两片：
   docker run -d --rm -e HS_AB_SHARD=0/2 -e HS_AB_OUT=/app/reports/ab_hs_0.txt \
@@ -93,25 +94,25 @@ def _shape_ok(self, *a, **kw):
 
 HeadShouldersStrategy._shape_ok = _shape_ok
 
-VARIANTS = ["OLD 改前", "NEW 改后"]
+VARIANTS = ["OLD 改前", "NEW 改后", "NOGATE 去肩离颈"]
 
 
 def set_variant(name: str) -> None:
-    """OLD = 把三处改动逐个还原；NEW = 库里默认。"""
-    if name == "NEW 改后":
-        MODE["gate"] = "lib"
-        HeadShouldersStrategy._pivot_series = _ORIG_PIVOT_SERIES
-        HeadShouldersStrategy._with_tail_pivot = _ORIG_TAIL
-        HeadShouldersStrategy._right_shoulder_confirmed = _ORIG_CONFIRM
+    """OLD = 把三处改动逐个还原；NEW = 库里默认；NOGATE = NEW 但去掉肩离颈闸。"""
+    if name == "OLD 改前":
+        MODE["gate"] = 0.4
+        HeadShouldersStrategy._pivot_series = (
+            lambda self, klines, *, is_high: klines.high if is_high else klines.low
+        )
+        HeadShouldersStrategy._with_tail_pivot = lambda self, pivots, series, *, is_high: pivots
+        HeadShouldersStrategy._right_shoulder_confirmed = (
+            lambda self, idx_r, last_idx: last_idx == idx_r + self.pivot_order
+        )
         return
-    MODE["gate"] = 0.4
-    HeadShouldersStrategy._pivot_series = (
-        lambda self, klines, *, is_high: klines.high if is_high else klines.low
-    )
-    HeadShouldersStrategy._with_tail_pivot = lambda self, pivots, series, *, is_high: pivots
-    HeadShouldersStrategy._right_shoulder_confirmed = (
-        lambda self, idx_r, last_idx: last_idx == idx_r + self.pivot_order
-    )
+    MODE["gate"] = 0.0 if name == "NOGATE 去肩离颈" else "lib"
+    HeadShouldersStrategy._pivot_series = _ORIG_PIVOT_SERIES
+    HeadShouldersStrategy._with_tail_pivot = _ORIG_TAIL
+    HeadShouldersStrategy._right_shoulder_confirmed = _ORIG_CONFIRM
 
 
 def to_dicts(df):
@@ -213,6 +214,7 @@ line(
 )
 line("OLD 改前 = 高低点拐点 + 肩离颈>=0.4h + 右肩后等 4 根")
 line("NEW 改后 = 点位按收盘价 + 肩离颈>=0.3h + 右肩当根即告警")
+line("NOGATE 去肩离颈 = 改后口径但肩离颈闸整条去掉")
 line("")
 
 tot: dict[str, dict[str, int]] = {}
@@ -267,8 +269,9 @@ for symbol in SYMBOLS:
 
             ko = {pkey(s) for s in got["OLD 改前"]}
             kn = {pkey(s) for s in got["NEW 改后"]}
+            kg = {pkey(s) for s in got["NOGATE 去肩离颈"]}
             at_new = {pkey(s): s["i"] for s in got["NEW 改后"]}
-            # 同一右肩：改后在这根告警、改后要再等 4 根，差值即提前根数
+            # 同一右肩：改后在这根告警、改前要再等 4 根，差值即提前根数
             lead = [s["i"] - at_new[pkey(s)] for s in got["OLD 改前"] if pkey(s) in kn]
             if DUMP:
                 for name in VARIANTS:
@@ -276,25 +279,24 @@ for symbol in SYMBOLS:
                         dlines.append(f"    {name} {tf // 60}m {s['when']}  {s['reason']}")
             for name in VARIANTS:
                 w, l, t = stats(got[name], df, symbol, tf)
-                bump(
-                    tf,
-                    name,
-                    len(got[name]),
-                    w,
-                    l,
-                    t,
-                    len(kn - ko) if name == "NEW 改后" else 0,
-                    len(ko - kn) if name == "NEW 改后" else 0,
-                    len(ko & kn),
-                    sum(lead),
-                    len(lead),
-                )
+                if name == "NEW 改后":
+                    added, lost, same = len(kn - ko), len(ko - kn), len(ko & kn)
+                    lead_sum, lead_n = sum(lead), len(lead)
+                elif name == "NOGATE 去肩离颈":
+                    added, lost, same = len(kg - kn), len(kn - kg), len(kg & kn)
+                    lead_sum, lead_n = 0, 0
+                else:
+                    added, lost, same = 0, 0, len(ko & kn)
+                    lead_sum, lead_n = 0, 0
+                bump(tf, name, len(got[name]), w, l, t, added, lost, same, lead_sum, lead_n)
             parts.append(
                 f"{tf // 60:>2}m OLD={len(got['OLD 改前'])} NEW={len(got['NEW 改后'])}"
+                f" NOGATE={len(got['NOGATE 去肩离颈'])}"
                 f" 同{len(ko & kn)} 新{len(kn - ko)} 旧{len(ko - kn)}"
                 f" 早{(sum(lead) / len(lead)) if lead else 0:.1f}根"
                 f" 胜/负 {tot[f'{tf}|OLD 改前']['w']}/{tot[f'{tf}|OLD 改前']['l']}"
                 f"->{tot[f'{tf}|NEW 改后']['w']}/{tot[f'{tf}|NEW 改后']['l']}"
+                f"->{tot[f'{tf}|NOGATE 去肩离颈']['w']}/{tot[f'{tf}|NOGATE 去肩离颈']['l']}"
             )
     tag = "watch" if symbol in WATCH else "extra "
     line(f"{symbol:18s} {tag} 1m={len(raw1):5d} | " + " | ".join(parts) + f"  ({time.time() - st:.0f}s)")
@@ -311,12 +313,15 @@ for label, table in (("全品种", tot), ("仅监控 41 品种", tot_w)):
             if not a:
                 continue
             den = max(a["w"] + a["l"], 1)
-            extra = (
-                f"  同形态 {a['same']}（平均早 {a['lead'] / max(a['ln'], 1):.1f} 根）"
-                f" 新增 {a['add']} 消失 {a['drop']}"
-                if name == "NEW 改后"
-                else ""
-            )
+            if name == "NEW 改后":
+                extra = (
+                    f"  同形态 {a['same']}（平均早 {a['lead'] / max(a['ln'], 1):.1f} 根）"
+                    f" 新增 {a['add']} 消失 {a['drop']}"
+                )
+            elif name == "NOGATE 去肩离颈":
+                extra = f"  同NEW {a['same']} 新增 {a['add']} 消失 {a['drop']}"
+            else:
+                extra = ""
             line(
                 f"  {tf // 60:>3}m  {name:10s} {a['n']:4d} 条  胜/负/超时 {a['w']}/{a['l']}/{a['t']}"
                 f"  胜率 {a['w'] / den:.1%}{extra}"

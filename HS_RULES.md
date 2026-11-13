@@ -42,7 +42,7 @@ git pull
 docker build -t futures-quant-api .       # 结尾空格+点不能少；不 build 则 docker run 秒退 can't open file
 ```
 
-规则 A/B（`scripts/ab_hs_rules.py`，OLD 用类方法补丁还原改前口径，NEW 走库内默认）：
+规则 A/B（`scripts/ab_hs_rules.py`，OLD 用类方法补丁还原改前口径，NEW 走库内默认，NOGATE = NEW 但肩离颈闸整条去掉，供裁决③）：
 
 ```bash
 docker run -d --rm --name ab_hs_0 --env-file .env -e HS_AB_SHARD=0/2 -e HS_AB_TFS=30m,1h,2h -e HS_AB_OUT=/app/reports/ab_hs_0.txt -v $PWD/reports:/app/reports futures-quant-api python -u scripts/ab_hs_rules.py
@@ -70,7 +70,7 @@ docker run -d --rm --name ab_hs_1 --env-file .env -e HS_AB_SHARD=1/2 -e HS_AB_TF
 
 ## 5. 未闭环事项
 
-- **③ 肩离颈 0.3× 是保留还是整条去掉**：用户原话是「这个距离的限制也去掉」，当前实现保守取了 0.3×，等 `reports/ab_hs_0.txt` + `ab_hs_1.txt` 的胜率和条数再裁决。
+- **③ 肩离颈 0.3× 是保留还是整条去掉**：用户原话是「这个距离的限制也去掉」，当前实现保守取了 0.3×。A/B 已加第三变体 NOGATE（NEW 口径去掉肩离颈闸），等 `reports/ab_hs_0.txt` + `ab_hs_1.txt` 三列的胜率和条数再裁决。
 - **①② 的全量裁决**：同样等上面两片数据（收盘价点位 / 右肩当根即告警）。
 - **数据修复**：11-06～11-10 的 30m/1h/2h/3h/4h 会话周期需回填——
   `docker compose run --rm --no-deps futures-ingest python -u scripts/rebuild_session_klines.py --all --start 2026-11-06 --end 2026-11-10`，确认输出无误后加 `--execute`；1d 的 11-06 另修。
