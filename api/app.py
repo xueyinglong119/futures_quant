@@ -324,6 +324,22 @@ def backtest_sym_killed_page() -> FileResponse:
     return FileResponse(page, media_type="text/html")
 
 
+@app.get("/backtest/conf")
+def backtest_conf_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_conf" / "gallery_single.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="确认极值肩回测尚未生成（reports/backtest_conf/gallery_single.html 不存在）")
+    return FileResponse(page, media_type="text/html")
+
+
+@app.get("/backtest/conf/killed")
+def backtest_conf_killed_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_conf" / "gallery_killed.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="确认极值肩被滤画廊尚未生成（reports/backtest_conf/gallery_killed.html 不存在）")
+    return FileResponse(page, media_type="text/html")
+
+
 @app.get("/alerts")
 def alerts_page() -> FileResponse:
     page = WEB_DIR / "alerts.html"

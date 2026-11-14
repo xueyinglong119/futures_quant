@@ -62,8 +62,8 @@ def _render(symbol: str, tf: int, sigs: list[dict], tdir: Path, prefix: str, con
     return meta
 
 
-def _job(job: tuple[str, int, int, str, bool, int, int, float, bool]) -> dict:
-    symbol, tf, days, outdir, allow_gap, pivot_order, load_days, prominence, no_time_gates = job
+def _job(job: tuple[str, int, int, str, bool, int, int, float, bool, bool]) -> dict:
+    symbol, tf, days, outdir, allow_gap, pivot_order, load_days, prominence, no_time_gates, confirmed_shoulders = job
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     label = DURATION_LABELS.get(tf, str(tf))
     conn = connect()
@@ -86,6 +86,7 @@ def _job(job: tuple[str, int, int, str, bool, int, int, float, bool]) -> dict:
                 pivot_order=pivot_order or None,
                 prominence=prominence or None,
                 no_time_gates=no_time_gates,
+                confirmed_shoulders=confirmed_shoulders,
             )
             if s["when"] >= cutoff
         ]
@@ -100,6 +101,7 @@ def _job(job: tuple[str, int, int, str, bool, int, int, float, bool]) -> dict:
                 pivot_order=pivot_order or None,
                 prominence=prominence or None,
                 no_time_gates=no_time_gates,
+                confirmed_shoulders=confirmed_shoulders,
             )
             if s["when"] >= cutoff
         ]
@@ -167,6 +169,11 @@ def main() -> None:
         action="store_true",
         help="回测对比用：去掉 130 分钟跨断点闸 + 5 交易日跨度闸（实盘口径不变）",
     )
+    ap.add_argument(
+        "--confirmed-shoulders",
+        action="store_true",
+        help="回测对比用：肩只认两侧确认局部极值、右肩与左肩价位匹配，触发回到右肩确认那根（实盘口径不变）",
+    )
     ap.add_argument("--outdir", type=str, default="")
     args = ap.parse_args()
 
@@ -193,12 +200,16 @@ def main() -> None:
                 "backtest_pivot"
                 if pivots
                 else (
-                    "backtest_time"
-                    if args.no_time_gates
+                    "backtest_conf"
+                    if args.confirmed_shoulders
                     else (
-                        "backtest_gap"
-                        if args.allow_session_gap
-                        else ("backtest_prom" if args.prominence else "backtest")
+                        "backtest_time"
+                        if args.no_time_gates
+                        else (
+                            "backtest_gap"
+                            if args.allow_session_gap
+                            else ("backtest_prom" if args.prominence else "backtest")
+                        )
                     )
                 )
             )
@@ -211,6 +222,7 @@ def main() -> None:
         (
             s, tf, args.days, str(outdir), args.allow_session_gap,
             pivots.get(tf, 0), args.load_days, args.prominence, args.no_time_gates,
+            args.confirmed_shoulders,
         )
         for tf in tfs
         for s in symbols
@@ -226,7 +238,8 @@ def main() -> None:
         f"跨断点={'放开(仅回测)' if args.allow_session_gap else '按实盘'}，"
         f"枢轴={piv_desc}{'(仅回测)' if pivots else ''}，"
         f"肩突出={args.prominence or 0.25:g}h{'(仅回测)' if args.prominence else ''}，"
-        f"时间闸={'去掉(仅回测)' if args.no_time_gates else '按实盘'}",
+        f"时间闸={'去掉(仅回测)' if args.no_time_gates else '按实盘'}，"
+        f"肩={'确认极值(仅回测)' if args.confirmed_shoulders else '当根尾部'}",
         flush=True,
     )
 
@@ -255,6 +268,7 @@ def main() -> None:
         "pivot_overrides": {DURATION_LABELS.get(k, str(k)): v for k, v in pivots.items()},
         "shoulder_prominence_ratio": args.prominence or 0.25,
         "no_time_gates": args.no_time_gates,
+        "confirmed_shoulders": args.confirmed_shoulders,
         "by_tf": {},
     }
     dirs = []
@@ -317,12 +331,16 @@ def main() -> None:
         "/backtest/pivot"
         if pivots
         else (
-            "/backtest/time"
-            if args.no_time_gates
+            "/backtest/conf"
+            if args.confirmed_shoulders
             else (
-                "/backtest/gap"
-                if args.allow_session_gap
-                else ("/backtest/prom" if args.prominence else "/backtest")
+                "/backtest/time"
+                if args.no_time_gates
+                else (
+                    "/backtest/gap"
+                    if args.allow_session_gap
+                    else ("/backtest/prom" if args.prominence else "/backtest")
+                )
             )
         )
     )
@@ -335,6 +353,8 @@ def main() -> None:
         mods.append(f"肩突出{args.prominence:g}h")
     if args.no_time_gates:
         mods.append("去掉时间闸")
+    if args.confirmed_shoulders:
+        mods.append("确认极值肩")
     tag = "v4 标定" + (f" · {' / '.join(mods)}(仅回测)" if mods else "")
     subtitle = (
         f"{len(symbols)} 品种 × {args.days} 天 × {labels} · {tag} · "

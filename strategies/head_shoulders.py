@@ -72,6 +72,7 @@ class HeadShouldersStrategy:
         gap_rule_max_duration_sec: int = 900,
         shoulder_prominence_ratio: float = 0.25,
         max_shoulder_head_span_ratio: float = 1.6,
+        confirmed_shoulders: bool = False,
     ):
         self.pivot_order = pivot_order
         self.shoulder_tolerance = shoulder_tolerance
@@ -94,6 +95,7 @@ class HeadShouldersStrategy:
         self.gap_rule_max_duration_sec = gap_rule_max_duration_sec
         self.shoulder_prominence_ratio = shoulder_prominence_ratio
         self.max_shoulder_head_span_ratio = max_shoulder_head_span_ratio
+        self.confirmed_shoulders = confirmed_shoulders
         self._traded_patterns: dict[str, set[str]] = {}
         self._active_trades: dict[str, _ActiveTrade] = {}
         self.trace: bool = False
@@ -112,8 +114,13 @@ class HeadShouldersStrategy:
 
         highs = self._pivot_series(klines, is_high=True)
         lows = self._pivot_series(klines, is_high=False)
-        pivot_highs = self._with_tail_pivot(self._find_pivot_highs(highs), highs, is_high=True)
-        pivot_lows = self._with_tail_pivot(self._find_pivot_lows(lows), lows, is_high=False)
+        if self.confirmed_shoulders:
+            # 只认两侧确认的局部极值作肩，右肩取与左肩价位匹配者；触发回到确认那根
+            pivot_highs = self._find_pivot_highs(highs)
+            pivot_lows = self._find_pivot_lows(lows)
+        else:
+            pivot_highs = self._with_tail_pivot(self._find_pivot_highs(highs), highs, is_high=True)
+            pivot_lows = self._with_tail_pivot(self._find_pivot_lows(lows), lows, is_high=False)
         traded = self._traded_patterns.setdefault(symbol, set())
 
         top_signal = self._detect_head_shoulders_top(
@@ -230,6 +237,8 @@ class HeadShouldersStrategy:
         return abs(left - right) / abs(reference) <= self.shoulder_tolerance
 
     def _right_shoulder_confirmed(self, idx_r: int, last_idx: int) -> bool:
+        if self.confirmed_shoulders:
+            return last_idx == idx_r + self.pivot_order
         return idx_r == last_idx
 
     def _level_neck(self, left_anchor: float, right_anchor: float) -> float | None:

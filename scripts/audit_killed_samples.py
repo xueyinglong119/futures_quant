@@ -26,9 +26,11 @@ def replay_detail(
     pivot_order: int | None = None,
     prominence: float | None = None,
     no_time_gates: bool = False,
+    confirmed_shoulders: bool = False,
 ):
     strat = make_strategy(duration_sec)
     strat.strict_shape = strict
+    strat.confirmed_shoulders = confirmed_shoulders
     if pivot_order is not None:
         # 只用于回测对比：缩短拐点左右确认根数
         strat.pivot_order = pivot_order
@@ -47,13 +49,23 @@ def replay_detail(
     order = strat.pivot_order
     min_len = strat.max_span_bars + order * 2 + 5
     pts = strat._pivot_series(df_all, is_high=True)
+    extreme_idx: set[int] = set()
+    if confirmed_shoulders:
+        # 确认口径在右肩后 order 根才告警，预过滤改看 i-order 是否两侧局部极值
+        extreme_idx = {i for i, _ in strat._find_pivot_highs(pts)} | {
+            i for i, _ in strat._find_pivot_lows(pts)
+        }
     out = []
     for i in range(min_len - 1, len(df_all)):
-        # 预过滤：右肩就是当前这根，只有盖过前 order 根的 K 线才可能告警
-        v = float(pts.iloc[i])
-        left = pts.iloc[i - order : i]
-        if not (v > float(left.max()) or v < float(left.min())):
-            continue
+        if confirmed_shoulders:
+            if (i - order) not in extreme_idx:
+                continue
+        else:
+            # 预过滤：右肩就是当前这根，只有盖过前 order 根的 K 线才可能告警
+            v = float(pts.iloc[i])
+            left = pts.iloc[i - order : i]
+            if not (v > float(left.max()) or v < float(left.min())):
+                continue
         win = df_all.iloc[max(0, i - window) : i + 1]
         sig = strat.on_bar(win, symbol=symbol)
         if sig is not None:
