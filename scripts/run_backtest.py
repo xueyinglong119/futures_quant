@@ -51,7 +51,7 @@ def _render(symbol: str, tf: int, sigs: list[dict], tdir: Path, prefix: str, con
         return meta
     tdir.mkdir(parents=True, exist_ok=True)
     for k, s in enumerate(sigs, 1):
-        png = render_hs_chart(symbol, tf, s["when"], s["detail"], conn)
+        png = render_hs_chart(symbol, tf, s["when"], s["detail"], conn, future_bars=15)
         if not png:
             continue
         name = f"{prefix}_{symbol.replace('@', '_').replace('.', '')}_{k:02d}.png"

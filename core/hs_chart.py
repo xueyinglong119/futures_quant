@@ -54,6 +54,7 @@ def render_hs_chart(
     bar_time: str,
     detail: dict[str, Any],
     conn: Any,
+    future_bars: int = 6,
 ) -> bytes | None:
     try:
         ref = datetime.fromisoformat(bar_time)
@@ -63,7 +64,7 @@ def render_hs_chart(
     if left_t is None:
         return None
     start = left_t - 20 * timedelta(seconds=duration_sec)
-    end = ref + 6 * timedelta(seconds=duration_sec)
+    end = ref + future_bars * timedelta(seconds=duration_sec)
     bars = load_bars(conn, symbol, duration_sec, start=start, end=end)
     if not bars:
         return None
