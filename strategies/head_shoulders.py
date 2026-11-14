@@ -658,7 +658,11 @@ class HeadShouldersStrategy:
                             self._tr(idx_l, idx_h, idx_r, "session")
                             continue
                     spread = abs(price_l - price_r)
-                    key = (height, -spread)
+                    if self.confirmed_shoulders:
+                        # 确认口径：同高度优先取最早合格的右肩，避免拖到更晚的 bump
+                        key = (height, -idx_r, -spread)
+                    else:
+                        key = (height, -spread)
                     if best is None or key > best[0]:
                         self._tr(idx_l, idx_h, idx_r, f"selected h={height:.1f} sp={spread:.1f}")
                         best = (
