@@ -41,7 +41,8 @@ class HeadShouldersStrategy:
     形态点位（肩、头、颈线拐点）一律按收盘价量，蜡烛高低点只用于风控摆动。
     两肩都要明显离开颈线（≥0.3×形态高度）。右肩就是当前这根 K 线即出告警/开仓，
     不必等破颈线，也不再多走 pivot_order 根确认。
-    strict_shape 质量闸：左右肩价差≤颈线1.5%、颈线斜率≤0.5%、≤2h 周期形态跨度≤5 个交易日、
+    strict_shape 质量闸：左右肩价差≤颈线1.5%、颈线斜率≤0.5%、两肩到头的 K 线间距比≤1.6×、
+    ≤2h 周期形态跨度≤5 个交易日、
     ≤15m 周期形态内相邻 K 线间隙>130 分钟（跨收盘/夜盘）即拒；
     同高度候选三元组取两肩价差最小者（经典对称本义）。
     肩部主导性：左肩须为其与头之间同向拐点极端；右肩之后若走出更极端的同向拐点，
@@ -70,6 +71,7 @@ class HeadShouldersStrategy:
         max_bar_gap_minutes: float = 130.0,
         gap_rule_max_duration_sec: int = 900,
         shoulder_prominence_ratio: float = 0.25,
+        max_shoulder_head_span_ratio: float = 1.6,
     ):
         self.pivot_order = pivot_order
         self.shoulder_tolerance = shoulder_tolerance
@@ -91,6 +93,7 @@ class HeadShouldersStrategy:
         self.max_bar_gap_minutes = max_bar_gap_minutes
         self.gap_rule_max_duration_sec = gap_rule_max_duration_sec
         self.shoulder_prominence_ratio = shoulder_prominence_ratio
+        self.max_shoulder_head_span_ratio = max_shoulder_head_span_ratio
         self._traded_patterns: dict[str, set[str]] = {}
         self._active_trades: dict[str, _ActiveTrade] = {}
         self.trace: bool = False
@@ -307,6 +310,11 @@ class HeadShouldersStrategy:
             if abs(price_l - price_r) > self.max_shoulder_spread_ratio * abs(neck_head):
                 return None
             if abs(p1 - p2) > self.max_neck_slope_ratio * abs(neck_head):
+                return None
+            # 两肩到头的 K 线间距须大致对称，一侧超过另一侧 1.6 倍即不成立
+            d_l = idx_h - idx_l
+            d_r = idx_r - idx_h
+            if max(d_l, d_r) > self.max_shoulder_head_span_ratio * min(d_l, d_r):
                 return None
             if closes is not None:
                 # 颈线被收盘价穿透说明锚点没取到真正的反弹极值，形态不成立

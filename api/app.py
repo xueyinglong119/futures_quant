@@ -308,6 +308,22 @@ def backtest_time_killed_page() -> FileResponse:
     return FileResponse(page, media_type="text/html")
 
 
+@app.get("/backtest/sym")
+def backtest_sym_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_sym" / "gallery_single.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="肩头对称闸回测尚未生成（reports/backtest_sym/gallery_single.html 不存在）")
+    return FileResponse(page, media_type="text/html")
+
+
+@app.get("/backtest/sym/killed")
+def backtest_sym_killed_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_sym" / "gallery_killed.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="肩头对称闸被滤画廊尚未生成（reports/backtest_sym/gallery_killed.html 不存在）")
+    return FileResponse(page, media_type="text/html")
+
+
 @app.get("/alerts")
 def alerts_page() -> FileResponse:
     page = WEB_DIR / "alerts.html"
