@@ -62,8 +62,8 @@ def _render(symbol: str, tf: int, sigs: list[dict], tdir: Path, prefix: str, con
     return meta
 
 
-def _job(job: tuple[str, int, int, str, bool, int, int, float]) -> dict:
-    symbol, tf, days, outdir, allow_gap, pivot_order, load_days, prominence = job
+def _job(job: tuple[str, int, int, str, bool, int, int, float, bool]) -> dict:
+    symbol, tf, days, outdir, allow_gap, pivot_order, load_days, prominence, no_time_gates = job
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     label = DURATION_LABELS.get(tf, str(tf))
     conn = connect()
@@ -85,6 +85,7 @@ def _job(job: tuple[str, int, int, str, bool, int, int, float]) -> dict:
                 symbol, tf, bars, False,
                 pivot_order=pivot_order or None,
                 prominence=prominence or None,
+                no_time_gates=no_time_gates,
             )
             if s["when"] >= cutoff
         ]
@@ -98,6 +99,7 @@ def _job(job: tuple[str, int, int, str, bool, int, int, float]) -> dict:
                 allow_session_gap=allow_gap,
                 pivot_order=pivot_order or None,
                 prominence=prominence or None,
+                no_time_gates=no_time_gates,
             )
             if s["when"] >= cutoff
         ]
@@ -160,6 +162,11 @@ def main() -> None:
         default=0.0,
         help="回测对比用：肩突出门槛占头高比例（0=按实盘 0.25）。如 0.2 放宽到 0.2×头高（实盘口径不变）",
     )
+    ap.add_argument(
+        "--no-time-gates",
+        action="store_true",
+        help="回测对比用：去掉 130 分钟跨断点闸 + 5 交易日跨度闸（实盘口径不变）",
+    )
     ap.add_argument("--outdir", type=str, default="")
     args = ap.parse_args()
 
@@ -186,9 +193,13 @@ def main() -> None:
                 "backtest_pivot"
                 if pivots
                 else (
-                    "backtest_gap"
-                    if args.allow_session_gap
-                    else ("backtest_prom" if args.prominence else "backtest")
+                    "backtest_time"
+                    if args.no_time_gates
+                    else (
+                        "backtest_gap"
+                        if args.allow_session_gap
+                        else ("backtest_prom" if args.prominence else "backtest")
+                    )
                 )
             )
         )
@@ -199,7 +210,7 @@ def main() -> None:
     jobs = [
         (
             s, tf, args.days, str(outdir), args.allow_session_gap,
-            pivots.get(tf, 0), args.load_days, args.prominence,
+            pivots.get(tf, 0), args.load_days, args.prominence, args.no_time_gates,
         )
         for tf in tfs
         for s in symbols
@@ -214,7 +225,8 @@ def main() -> None:
         f"workers={args.workers}，作业 {len(jobs)}，"
         f"跨断点={'放开(仅回测)' if args.allow_session_gap else '按实盘'}，"
         f"枢轴={piv_desc}{'(仅回测)' if pivots else ''}，"
-        f"肩突出={args.prominence or 0.25:g}h{'(仅回测)' if args.prominence else ''}",
+        f"肩突出={args.prominence or 0.25:g}h{'(仅回测)' if args.prominence else ''}，"
+        f"时间闸={'去掉(仅回测)' if args.no_time_gates else '按实盘'}",
         flush=True,
     )
 
@@ -242,6 +254,7 @@ def main() -> None:
         "allow_session_gap": args.allow_session_gap,
         "pivot_overrides": {DURATION_LABELS.get(k, str(k)): v for k, v in pivots.items()},
         "shoulder_prominence_ratio": args.prominence or 0.25,
+        "no_time_gates": args.no_time_gates,
         "by_tf": {},
     }
     dirs = []
@@ -304,9 +317,13 @@ def main() -> None:
         "/backtest/pivot"
         if pivots
         else (
-            "/backtest/gap"
-            if args.allow_session_gap
-            else ("/backtest/prom" if args.prominence else "/backtest")
+            "/backtest/time"
+            if args.no_time_gates
+            else (
+                "/backtest/gap"
+                if args.allow_session_gap
+                else ("/backtest/prom" if args.prominence else "/backtest")
+            )
         )
     )
     mods = []
@@ -316,6 +333,8 @@ def main() -> None:
         mods.append("放开跨断点")
     if args.prominence:
         mods.append(f"肩突出{args.prominence:g}h")
+    if args.no_time_gates:
+        mods.append("去掉时间闸")
     tag = "v4 标定" + (f" · {' / '.join(mods)}(仅回测)" if mods else "")
     subtitle = (
         f"{len(symbols)} 品种 × {args.days} 天 × {labels} · {tag} · "
