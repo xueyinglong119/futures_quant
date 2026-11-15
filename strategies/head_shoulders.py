@@ -40,7 +40,7 @@ class HeadShouldersStrategy:
     一边可以有两个肩，取其中能和另一边配成形态的那一对。
     颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的 1/4。
     形态点位（肩、头、颈线拐点）一律按收盘价量，蜡烛高低点只用于风控摆动。
-    两肩都要明显离开颈线（1m 颈线锚点离肩≥3 根，其余 ≥1 根，且肩在颈线正确一侧）。肩取两侧确认的局部极值，
+    两肩都要明显离开颈线（至少 0.1×头高的余量，1m 另要求颈线锚点离肩≥3 根）。肩取两侧确认的局部极值，
     右肩确认（pivot_order 根）后出告警/开仓。
     strict_shape 质量闸：左右肩价差≤颈线1.5%、两肩到头的 K 线间距比≤4×（双重/平台/三重头跳过）；
     头到颈线至少 10 个价格点（且 ≥0.8% 价格），太浅的形态不成立；
@@ -69,6 +69,7 @@ class HeadShouldersStrategy:
         dominance_reaction_ratio: float = 3.0,
         shoulder_prominence_ratio: float = 0.2,
         shoulder_neck_bars: int = 3,
+        min_shoulder_neck_ratio: float = 0.1,
         triple_head_tolerance_ratio: float = 0.25,
         double_head_tolerance_ratio: float = 0.25,
         flat_head_min_bars: int = 4,
@@ -93,6 +94,7 @@ class HeadShouldersStrategy:
         self.dominance_reaction_ratio = dominance_reaction_ratio
         self.shoulder_prominence_ratio = shoulder_prominence_ratio
         self.shoulder_neck_bars = shoulder_neck_bars
+        self.min_shoulder_neck_ratio = min_shoulder_neck_ratio
         self.triple_head_tolerance_ratio = triple_head_tolerance_ratio
         self.double_head_tolerance_ratio = double_head_tolerance_ratio
         self.flat_head_min_bars = flat_head_min_bars
@@ -315,14 +317,15 @@ class HeadShouldersStrategy:
             return None
         neck_at_l = self._line_at(n1, p1, n2, p2, idx_l)
         neck_at_r = self._line_at(n1, p1, n2, p2, idx_r)
-        # 肩离颈不卡 0.3×头高的价格幅度；锚点间隔只对 1m 收紧到 3 根（3 分钟），其余保持原 ≥1 根
+        # 肩离颈不卡 0.3×头高，但至少要有 0.1×头高的余量（防止颈线贴穿肩）
         gap = self.shoulder_neck_bars if self.duration_sec == 60 else 1
         if n1 - idx_l < gap or idx_r - n2 < gap:
             return None
+        margin = self.min_shoulder_neck_ratio * height
         if bottom:
-            if neck_at_l <= price_l or neck_at_r <= price_r:
+            if neck_at_l - price_l < margin or neck_at_r - price_r < margin:
                 return None
-        elif price_l <= neck_at_l or price_r <= neck_at_r:
+        elif price_l - neck_at_l < margin or price_r - neck_at_r < margin:
             return None
         if self.strict_shape:
             if abs(price_l - price_r) > self.max_shoulder_spread_ratio * abs(neck_head):
