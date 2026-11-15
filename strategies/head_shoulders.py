@@ -71,6 +71,7 @@ class HeadShouldersStrategy:
         shoulder_neck_bars: int = 3,
         triple_head_tolerance_ratio: float = 0.25,
         double_head_tolerance_ratio: float = 0.25,
+        flat_head_min_bars: int = 4,
         max_shoulder_head_span_ratio: float = 1.6,
         confirmed_shoulders: bool = True,
     ):
@@ -94,6 +95,7 @@ class HeadShouldersStrategy:
         self.shoulder_neck_bars = shoulder_neck_bars
         self.triple_head_tolerance_ratio = triple_head_tolerance_ratio
         self.double_head_tolerance_ratio = double_head_tolerance_ratio
+        self.flat_head_min_bars = flat_head_min_bars
         self.max_shoulder_head_span_ratio = max_shoulder_head_span_ratio
         self.confirmed_shoulders = confirmed_shoulders
         self._traded_patterns: dict[str, set[str]] = {}
@@ -617,7 +619,8 @@ class HeadShouldersStrategy:
                     if neck_l is None or neck_r is None:
                         self._tr(idx_l, idx_h, idx_r, "neck_none")
                         continue
-                    # 双重底/顶：两个颈锚点之间还有一根与头价差 ≤0.25×头高的同向极值
+                    # 双重底/顶：两个颈锚点之间还有一根与头价差 ≤0.25×头高的同向极值；
+                    # 平台底/顶：头附近（≤0.25×头高）连续 4 根以上收盘也算特殊形态
                     double_head = False
                     neck_head_pre = self._line_at(
                         neck_l[0], neck_l[1], neck_r[0], neck_r[1], idx_h
@@ -634,7 +637,15 @@ class HeadShouldersStrategy:
                             for i, p in peers
                             if span_lo < i < span_hi and abs(p - price_h) <= tol_d
                         ]
-                        double_head = len(similar) >= 2
+                        near_bars = sum(
+                            1
+                            for i in range(span_lo + 1, span_hi)
+                            if abs(float(extreme.iloc[i]) - price_h) <= tol_d
+                        )
+                        double_head = (
+                            len(similar) >= 2
+                            or near_bars >= self.flat_head_min_bars
+                        )
                     shaped = self._shape_ok(
                         price_l,
                         price_h,
