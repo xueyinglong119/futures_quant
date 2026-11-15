@@ -24,43 +24,28 @@ def replay_detail(
     *,
     pivot_order: int | None = None,
     prominence: float | None = None,
-    no_time_gates: bool = False,
-    confirmed_shoulders: bool = False,
 ):
     strat = make_strategy(duration_sec)
     strat.strict_shape = strict
-    strat.confirmed_shoulders = confirmed_shoulders
     if pivot_order is not None:
         # 只用于回测对比：缩短拐点左右确认根数
         strat.pivot_order = pivot_order
     if prominence is not None:
-        # 只用于回测对比：放宽肩突出门槛（默认 0.25×头高）
+        # 只用于回测对比：覆盖肩突出门槛（实盘 0.2×头高）
         strat.shoulder_prominence_ratio = prominence
-    if no_time_gates:
-        # 只用于回测对比：去掉 5 交易日跨度闸
-        strat.max_span_sessions = 10**9
     df_all = bars_to_strategy_df(bars)
     window = TF_CONFIGS[duration_sec].lookback_bars if duration_sec in TF_CONFIGS else 400
     order = strat.pivot_order
     min_len = strat.max_span_bars + order * 2 + 5
     pts = strat._pivot_series(df_all, is_high=True)
-    extreme_idx: set[int] = set()
-    if confirmed_shoulders:
-        # 确认口径在右肩后 order 根才告警，预过滤改看 i-order 是否两侧局部极值
-        extreme_idx = {i for i, _ in strat._find_pivot_highs(pts)} | {
-            i for i, _ in strat._find_pivot_lows(pts)
-        }
+    # 确认口径在右肩后 order 根才告警，预过滤看 i-order 是否两侧局部极值
+    extreme_idx = {i for i, _ in strat._find_pivot_highs(pts)} | {
+        i for i, _ in strat._find_pivot_lows(pts)
+    }
     out = []
     for i in range(min_len - 1, len(df_all)):
-        if confirmed_shoulders:
-            if (i - order) not in extreme_idx:
-                continue
-        else:
-            # 预过滤：右肩就是当前这根，只有盖过前 order 根的 K 线才可能告警
-            v = float(pts.iloc[i])
-            left = pts.iloc[i - order : i]
-            if not (v > float(left.max()) or v < float(left.min())):
-                continue
+        if (i - order) not in extreme_idx:
+            continue
         win = df_all.iloc[max(0, i - window) : i + 1]
         sig = strat.on_bar(win, symbol=symbol)
         if sig is not None:

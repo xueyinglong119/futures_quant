@@ -62,8 +62,8 @@ def _render(symbol: str, tf: int, sigs: list[dict], tdir: Path, prefix: str, con
     return meta
 
 
-def _job(job: tuple[str, int, int, str, int, int, float, bool, bool]) -> dict:
-    symbol, tf, days, outdir, pivot_order, load_days, prominence, no_time_gates, confirmed_shoulders = job
+def _job(job: tuple[str, int, int, str, int, int, float]) -> dict:
+    symbol, tf, days, outdir, pivot_order, load_days, prominence = job
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     label = DURATION_LABELS.get(tf, str(tf))
     conn = connect()
@@ -85,8 +85,6 @@ def _job(job: tuple[str, int, int, str, int, int, float, bool, bool]) -> dict:
                 symbol, tf, bars, False,
                 pivot_order=pivot_order or None,
                 prominence=prominence or None,
-                no_time_gates=no_time_gates,
-                confirmed_shoulders=confirmed_shoulders,
             )
             if s["when"] >= cutoff
         ]
@@ -99,8 +97,6 @@ def _job(job: tuple[str, int, int, str, int, int, float, bool, bool]) -> dict:
                 True,
                 pivot_order=pivot_order or None,
                 prominence=prominence or None,
-                no_time_gates=no_time_gates,
-                confirmed_shoulders=confirmed_shoulders,
             )
             if s["when"] >= cutoff
         ]
@@ -156,23 +152,13 @@ def main() -> None:
         "--prominence",
         type=float,
         default=0.0,
-        help="回测对比用：肩突出门槛占头高比例（0=按实盘 0.25）。如 0.2 放宽到 0.2×头高（实盘口径不变）",
-    )
-    ap.add_argument(
-        "--no-time-gates",
-        action="store_true",
-        help="回测对比用：去掉 5 交易日跨度闸（130 分钟间隙闸已移除；实盘口径不变）",
-    )
-    ap.add_argument(
-        "--confirmed-shoulders",
-        action="store_true",
-        help="回测对比用：肩只认两侧确认局部极值、右肩与左肩价位匹配，触发回到右肩确认那根（实盘口径不变）",
+        help="回测对比用：肩突出门槛占头高比例（0=按实盘 0.2）。如 0.25 收紧到 0.25×头高（实盘口径不变）",
     )
     ap.add_argument("--outdir", type=str, default="")
     args = ap.parse_args()
 
     if args.prominence < 0:
-        ap.error("--prominence 不能为负（0=按实盘 0.25）")
+        ap.error("--prominence 不能为负（0=按实盘 0.2）")
 
     tfs = [int(x) for x in args.tfs.split(",") if x.strip()]
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
@@ -193,15 +179,7 @@ def main() -> None:
             / (
                 "backtest_pivot"
                 if pivots
-                else (
-                    "backtest_conf"
-                    if args.confirmed_shoulders
-                    else (
-                        "backtest_time"
-                        if args.no_time_gates
-                        else ("backtest_prom" if args.prominence else "backtest")
-                    )
-                )
+                else ("backtest_prom" if args.prominence else "backtest")
             )
         )
     )
@@ -211,8 +189,7 @@ def main() -> None:
     jobs = [
         (
             s, tf, args.days, str(outdir),
-            pivots.get(tf, 0), args.load_days, args.prominence, args.no_time_gates,
-            args.confirmed_shoulders,
+            pivots.get(tf, 0), args.load_days, args.prominence,
         )
         for tf in tfs
         for s in symbols
@@ -226,9 +203,7 @@ def main() -> None:
         f"预热 {args.load_days or '按周期'} 天，"
         f"workers={args.workers}，作业 {len(jobs)}，"
         f"枢轴={piv_desc}{'(仅回测)' if pivots else ''}，"
-        f"肩突出={args.prominence or 0.25:g}h{'(仅回测)' if args.prominence else ''}，"
-        f"时间闸={'去掉(仅回测)' if args.no_time_gates else '按实盘'}，"
-        f"肩={'确认极值(仅回测)' if args.confirmed_shoulders else '当根尾部'}",
+        f"肩突出={args.prominence or 0.2:g}h{'(仅回测)' if args.prominence else ''}",
         flush=True,
     )
 
@@ -254,9 +229,7 @@ def main() -> None:
         "symbols": symbols,
         "tfs": tfs,
         "pivot_overrides": {DURATION_LABELS.get(k, str(k)): v for k, v in pivots.items()},
-        "shoulder_prominence_ratio": args.prominence or 0.25,
-        "no_time_gates": args.no_time_gates,
-        "confirmed_shoulders": args.confirmed_shoulders,
+        "shoulder_prominence_ratio": args.prominence or 0.2,
         "by_tf": {},
     }
     dirs = []
@@ -318,25 +291,13 @@ def main() -> None:
     base = (
         "/backtest/pivot"
         if pivots
-        else (
-            "/backtest/conf"
-            if args.confirmed_shoulders
-            else (
-                "/backtest/time"
-                if args.no_time_gates
-                else ("/backtest/prom" if args.prominence else "/backtest")
-            )
-        )
+        else ("/backtest/prom" if args.prominence else "/backtest")
     )
     mods = []
     if pivots:
         mods.append(f"枢轴{piv_desc}")
     if args.prominence:
         mods.append(f"肩突出{args.prominence:g}h")
-    if args.no_time_gates:
-        mods.append("去掉时间闸")
-    if args.confirmed_shoulders:
-        mods.append("确认极值肩")
     tag = "v4 标定" + (f" · {' / '.join(mods)}(仅回测)" if mods else "")
     subtitle = (
         f"{len(symbols)} 品种 × {args.days} 天 × {labels} · {tag} · "

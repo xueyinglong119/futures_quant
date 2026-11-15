@@ -39,11 +39,10 @@ class HeadShouldersStrategy:
     头是区间里的极值。一边可以有两个肩，取其中能和另一边配成形态的那一对。
     颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的 1/4。
     形态点位（肩、头、颈线拐点）一律按收盘价量，蜡烛高低点只用于风控摆动。
-    两肩都要明显离开颈线（颈线锚点离肩≥3 根，且肩在颈线正确一侧）。右肩就是当前这根 K 线即出告警/开仓，
-    不必等破颈线，也不再多走 pivot_order 根确认。
-    strict_shape 质量闸：左右肩价差≤颈线1.5%、两肩到头的 K 线间距比≤1.6×、
-    ≤2h 周期形态跨度≤5 个交易日；
-    同高度候选三元组取两肩价差最小者（经典对称本义）。
+    两肩都要明显离开颈线（颈线锚点离肩≥3 根，且肩在颈线正确一侧）。肩取两侧确认的局部极值，
+    右肩确认（pivot_order 根）后出告警/开仓。
+    strict_shape 质量闸：左右肩价差≤颈线1.5%、两肩到头的 K 线间距比≤1.6×；
+    同一头高优先取最早的合格右肩，其次两肩价差最小。
     肩部主导性：左肩须为其与头之间同向拐点极端；右肩之后若走出更极端的同向拐点，
     该形态在后续 K 线上自然不再成立。
     """
@@ -65,12 +64,10 @@ class HeadShouldersStrategy:
         max_shoulder_spread_ratio: float = 0.015,
         max_neck_slope_ratio: float = 0.005,
         dominance_reaction_ratio: float = 3.0,
-        max_span_sessions: int = 5,
-        session_cap_max_duration_sec: int = 7200,
-        shoulder_prominence_ratio: float = 0.25,
+        shoulder_prominence_ratio: float = 0.2,
         shoulder_neck_bars: int = 3,
         max_shoulder_head_span_ratio: float = 1.6,
-        confirmed_shoulders: bool = False,
+        confirmed_shoulders: bool = True,
     ):
         self.pivot_order = pivot_order
         self.shoulder_tolerance = shoulder_tolerance
@@ -87,8 +84,6 @@ class HeadShouldersStrategy:
         self.max_shoulder_spread_ratio = max_shoulder_spread_ratio
         self.max_neck_slope_ratio = max_neck_slope_ratio
         self.dominance_reaction_ratio = dominance_reaction_ratio
-        self.max_span_sessions = max_span_sessions
-        self.session_cap_max_duration_sec = session_cap_max_duration_sec
         self.shoulder_prominence_ratio = shoulder_prominence_ratio
         self.shoulder_neck_bars = shoulder_neck_bars
         self.max_shoulder_head_span_ratio = max_shoulder_head_span_ratio
@@ -634,16 +629,6 @@ class HeadShouldersStrategy:
                     n1, p1 = neck_l
                     n2, p2 = neck_r
                     neck_now = self._line_at(n1, p1, n2, p2, last_idx)
-                    if (
-                        self.strict_shape
-                        and 0 < self.duration_sec <= self.session_cap_max_duration_sec
-                    ):
-                        sessions = pd.to_datetime(
-                            klines["datetime"].iloc[idx_l : last_idx + 1]
-                        ).dt.date.nunique()
-                        if sessions > self.max_span_sessions:
-                            self._tr(idx_l, idx_h, idx_r, "session")
-                            continue
                     spread = abs(price_l - price_r)
                     if self.confirmed_shoulders:
                         # 确认口径：同高度优先取最早合格的右肩，避免拖到更晚的 bump
