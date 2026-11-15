@@ -36,7 +36,8 @@ class HeadShouldersStrategy:
     """
     头肩顶 / 头肩底。
 
-    头是区间里的极值。一边可以有两个肩，取其中能和另一边配成形态的那一对。
+    头是区间里的极值；三重底/顶时允许头是近似等高的中间极值（与区间极值差 ≤0.25×头高）。
+    一边可以有两个肩，取其中能和另一边配成形态的那一对。
     颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的 1/4。
     形态点位（肩、头、颈线拐点）一律按收盘价量，蜡烛高低点只用于风控摆动。
     两肩都要明显离开颈线（1m 颈线锚点离肩≥3 根，其余 ≥1 根，且肩在颈线正确一侧）。肩取两侧确认的局部极值，
@@ -66,6 +67,7 @@ class HeadShouldersStrategy:
         dominance_reaction_ratio: float = 3.0,
         shoulder_prominence_ratio: float = 0.2,
         shoulder_neck_bars: int = 3,
+        triple_head_tolerance_ratio: float = 0.25,
         max_shoulder_head_span_ratio: float = 1.6,
         confirmed_shoulders: bool = True,
     ):
@@ -86,6 +88,7 @@ class HeadShouldersStrategy:
         self.dominance_reaction_ratio = dominance_reaction_ratio
         self.shoulder_prominence_ratio = shoulder_prominence_ratio
         self.shoulder_neck_bars = shoulder_neck_bars
+        self.triple_head_tolerance_ratio = triple_head_tolerance_ratio
         self.max_shoulder_head_span_ratio = max_shoulder_head_span_ratio
         self.confirmed_shoulders = confirmed_shoulders
         self._traded_patterns: dict[str, set[str]] = {}
@@ -596,12 +599,6 @@ class HeadShouldersStrategy:
                         self._tr(idx_l, idx_h, idx_r, "traded")
                         continue
                     window = extreme.iloc[idx_l : idx_r + 1]
-                    if bottom and float(window.min()) < price_h:
-                        self._tr(idx_l, idx_h, idx_r, "window_extreme")
-                        continue
-                    if not bottom and float(window.max()) > price_h:
-                        self._tr(idx_l, idx_h, idx_r, "window_extreme")
-                        continue
                     neck_l = self._reaction_neck(
                         reaction_pivots, idx_l, idx_h, lowest=not bottom
                     )
@@ -627,6 +624,15 @@ class HeadShouldersStrategy:
                         self._tr(idx_l, idx_h, idx_r, "shape")
                         continue
                     height, _neck_head = shaped
+                    # 三重底/顶：头可偏离区间极值至多 0.25×头高（近似等高的三个极值也算成立）
+                    tol_h = self.triple_head_tolerance_ratio * height
+                    if bottom:
+                        if price_h - float(window.min()) > tol_h:
+                            self._tr(idx_l, idx_h, idx_r, "window_extreme")
+                            continue
+                    elif float(window.max()) - price_h > tol_h:
+                        self._tr(idx_l, idx_h, idx_r, "window_extreme")
+                        continue
                     n1, p1 = neck_l
                     n2, p2 = neck_r
                     neck_now = self._line_at(n1, p1, n2, p2, last_idx)
