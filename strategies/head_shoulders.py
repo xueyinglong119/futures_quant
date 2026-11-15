@@ -43,7 +43,7 @@ class HeadShouldersStrategy:
     两肩都要明显离开颈线（1m 颈线锚点离肩≥3 根，其余 ≥1 根，且肩在颈线正确一侧）。肩取两侧确认的局部极值，
     右肩确认（pivot_order 根）后出告警/开仓。
     strict_shape 质量闸：左右肩价差≤颈线1.5%、两肩到头的 K 线间距比≤1.6×；
-    两肩价差最小的候选优先，其次取最早的合格右肩，再次头高。
+    两肩价差最小的候选优先，其次取最早的合格右肩，再次左右腿最均衡的，最后头高。
     肩部主导性：左肩须为其与头之间同向拐点极端；右肩之后若走出更极端的同向拐点，
     该形态在后续 K 线上自然不再成立。
     """
@@ -638,9 +638,11 @@ class HeadShouldersStrategy:
                     neck_now = self._line_at(n1, p1, n2, p2, last_idx)
                     spread = abs(price_l - price_r)
                     if self.confirmed_shoulders:
-                        # 肩形优先：两肩价差最小 → 最早合格右肩 → 头高
-                        # （头高优先会偏向「更晚右肩 → 更低右颈锚点 → 头高更大」的宽幅组合）
-                        key = (-spread, -idx_r, height)
+                        # 肩形优先：两肩价差最小 → 最早合格右肩 → 左右腿最均衡 → 头高
+                        # （三重底/顶时同一对肩下会选出中间那个更均衡的头）
+                        d_l = idx_h - idx_l
+                        d_r = idx_r - idx_h
+                        key = (-spread, -idx_r, -abs(d_l - d_r), height)
                     else:
                         key = (height, -spread)
                     if best is None or key > best[0]:
