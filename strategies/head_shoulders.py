@@ -43,6 +43,7 @@ class HeadShouldersStrategy:
     两肩都要明显离开颈线（1m 颈线锚点离肩≥3 根，其余 ≥1 根，且肩在颈线正确一侧）。肩取两侧确认的局部极值，
     右肩确认（pivot_order 根）后出告警/开仓。
     strict_shape 质量闸：左右肩价差≤颈线1.5%、两肩到头的 K 线间距比≤1.6×；
+    头到颈线至少 10 个价格点（且 ≥0.8% 价格），太浅的形态不成立；
     两肩价差最小的候选优先，其次取最早的合格右肩，再次左右腿最均衡的，最后头高。
     肩部主导性：左肩须为其与头之间同向拐点极端；右肩之后若走出更极端的同向拐点，
     该形态在后续 K 线上自然不再成立。
@@ -57,6 +58,7 @@ class HeadShouldersStrategy:
         neck_break_ratio: float = 0.001,
         max_right_above_left_ratio: float = 0.015,
         min_head_neck_ratio: float = 0.008,
+        min_head_neck_points: float = 10.0,
         stop_beyond_head_ratio: float = 0.005,
         take_profit_at_neck: bool = True,
         max_volume: int = 1,
@@ -79,6 +81,7 @@ class HeadShouldersStrategy:
         self.neck_break_ratio = neck_break_ratio
         self.max_right_above_left_ratio = max_right_above_left_ratio
         self.min_head_neck_ratio = min_head_neck_ratio
+        self.min_head_neck_points = min_head_neck_points
         self.stop_beyond_head_ratio = stop_beyond_head_ratio
         self.take_profit_at_neck = take_profit_at_neck
         self.max_volume = max_volume
@@ -292,6 +295,8 @@ class HeadShouldersStrategy:
         neck_head = self._line_at(n1, p1, n2, p2, idx_h)
         height = (neck_head - price_h) if bottom else (price_h - neck_head)
         if height <= 0 or price_h == 0:
+            return None
+        if height < self.min_head_neck_points:
             return None
         if height / abs(price_h) < self.min_head_neck_ratio:
             return None
