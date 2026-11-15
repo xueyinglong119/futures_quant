@@ -630,11 +630,10 @@ class HeadShouldersStrategy:
                     )
                     if height_pre > 0:
                         tol_d = self.double_head_tolerance_ratio * height_pre
-                        peers = pivot_lows if bottom else pivot_highs
                         span_lo, span_hi = sorted((neck_l[0], neck_r[0]))
                         similar = [
                             p
-                            for i, p in peers
+                            for i, p in pivots
                             if span_lo < i < span_hi and abs(p - price_h) <= tol_d
                         ]
                         near_bars = sum(
