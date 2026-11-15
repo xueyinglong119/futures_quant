@@ -72,6 +72,7 @@ class HeadShouldersStrategy:
         min_shoulder_neck_ratio: float = 0.1,
         triple_head_tolerance_ratio: float = 0.25,
         double_head_tolerance_ratio: float = 0.25,
+        flat_head_tolerance_ratio: float = 0.1,
         flat_head_min_bars: int = 4,
         max_shoulder_head_span_ratio: float = 2.5,
         confirmed_shoulders: bool = True,
@@ -97,6 +98,7 @@ class HeadShouldersStrategy:
         self.min_shoulder_neck_ratio = min_shoulder_neck_ratio
         self.triple_head_tolerance_ratio = triple_head_tolerance_ratio
         self.double_head_tolerance_ratio = double_head_tolerance_ratio
+        self.flat_head_tolerance_ratio = flat_head_tolerance_ratio
         self.flat_head_min_bars = flat_head_min_bars
         self.max_shoulder_head_span_ratio = max_shoulder_head_span_ratio
         self.confirmed_shoulders = confirmed_shoulders
@@ -642,7 +644,8 @@ class HeadShouldersStrategy:
                         near_bars = sum(
                             1
                             for i in range(span_lo + 1, span_hi)
-                            if abs(float(extreme.iloc[i]) - price_h) <= tol_d
+                            if abs(float(extreme.iloc[i]) - price_h)
+                            <= self.flat_head_tolerance_ratio * height_pre
                         )
                         double_head = (
                             len(similar) >= 2
