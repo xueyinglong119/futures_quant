@@ -39,7 +39,7 @@ class HeadShouldersStrategy:
     头是区间里的极值。一边可以有两个肩，取其中能和另一边配成形态的那一对。
     颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的 1/4。
     形态点位（肩、头、颈线拐点）一律按收盘价量，蜡烛高低点只用于风控摆动。
-    两肩都要明显离开颈线（颈线锚点离肩≥3 根，且肩在颈线正确一侧）。肩取两侧确认的局部极值，
+    两肩都要明显离开颈线（1m 颈线锚点离肩≥3 根，其余 ≥1 根，且肩在颈线正确一侧）。肩取两侧确认的局部极值，
     右肩确认（pivot_order 根）后出告警/开仓。
     strict_shape 质量闸：左右肩价差≤颈线1.5%、两肩到头的 K 线间距比≤1.6×；
     两肩价差最小的候选优先，其次取最早的合格右肩，再次头高。
@@ -302,8 +302,9 @@ class HeadShouldersStrategy:
             return None
         neck_at_l = self._line_at(n1, p1, n2, p2, idx_l)
         neck_at_r = self._line_at(n1, p1, n2, p2, idx_r)
-        # 肩离颈不卡 0.3×头高的价格幅度，只要求颈线锚点离肩足够远，肩仍须在颈线正确一侧
-        if n1 - idx_l < self.shoulder_neck_bars or idx_r - n2 < self.shoulder_neck_bars:
+        # 肩离颈不卡 0.3×头高的价格幅度；锚点间隔只对 1m 收紧到 3 根（3 分钟），其余保持原 ≥1 根
+        gap = self.shoulder_neck_bars if self.duration_sec == 60 else 1
+        if n1 - idx_l < gap or idx_r - n2 < gap:
             return None
         if bottom:
             if neck_at_l <= price_l or neck_at_r <= price_r:
