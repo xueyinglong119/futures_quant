@@ -39,7 +39,7 @@ class HeadShouldersStrategy:
     头是区间里的极值。一边可以有两个肩，取其中能和另一边配成形态的那一对。
     颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的 1/4。
     形态点位（肩、头、颈线拐点）一律按收盘价量，蜡烛高低点只用于风控摆动。
-    两肩都要明显离开颈线（≥0.3×形态高度）。右肩就是当前这根 K 线即出告警/开仓，
+    两肩都要明显离开颈线（≥0.3×形态高度；1m 改为颈线锚点离肩≥3 根）。右肩就是当前这根 K 线即出告警/开仓，
     不必等破颈线，也不再多走 pivot_order 根确认。
     strict_shape 质量闸：左右肩价差≤颈线1.5%、颈线斜率≤0.5%、两肩到头的 K 线间距比≤1.6×、
     ≤2h 周期形态跨度≤5 个交易日；
@@ -68,6 +68,7 @@ class HeadShouldersStrategy:
         max_span_sessions: int = 5,
         session_cap_max_duration_sec: int = 7200,
         shoulder_prominence_ratio: float = 0.25,
+        m1_shoulder_neck_bars: int = 3,
         max_shoulder_head_span_ratio: float = 1.6,
         confirmed_shoulders: bool = False,
     ):
@@ -89,6 +90,7 @@ class HeadShouldersStrategy:
         self.max_span_sessions = max_span_sessions
         self.session_cap_max_duration_sec = session_cap_max_duration_sec
         self.shoulder_prominence_ratio = shoulder_prominence_ratio
+        self.m1_shoulder_neck_bars = m1_shoulder_neck_bars
         self.max_shoulder_head_span_ratio = max_shoulder_head_span_ratio
         self.confirmed_shoulders = confirmed_shoulders
         self._traded_patterns: dict[str, set[str]] = {}
@@ -305,7 +307,19 @@ class HeadShouldersStrategy:
             return None
         neck_at_l = self._line_at(n1, p1, n2, p2, idx_l)
         neck_at_r = self._line_at(n1, p1, n2, p2, idx_r)
-        if bottom:
+        if self.duration_sec == 60:
+            # 1m 形态本来就短：肩离颈不看 0.3×头高的价格幅度，只要求颈线锚点离肩≥3 根
+            if (
+                n1 - idx_l < self.m1_shoulder_neck_bars
+                or idx_r - n2 < self.m1_shoulder_neck_bars
+            ):
+                return None
+            if bottom:
+                if neck_at_l <= price_l or neck_at_r <= price_r:
+                    return None
+            elif price_l <= neck_at_l or price_r <= neck_at_r:
+                return None
+        elif bottom:
             if neck_at_l - price_l < 0.3 * height or neck_at_r - price_r < 0.3 * height:
                 return None
         elif price_l - neck_at_l < 0.3 * height or price_r - neck_at_r < 0.3 * height:
