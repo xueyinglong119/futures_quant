@@ -68,6 +68,7 @@ class HeadShouldersStrategy:
         shoulder_prominence_ratio: float = 0.2,
         shoulder_neck_bars: int = 3,
         triple_head_tolerance_ratio: float = 0.25,
+        double_head_tolerance_ratio: float = 0.25,
         max_shoulder_head_span_ratio: float = 1.6,
         confirmed_shoulders: bool = True,
     ):
@@ -89,6 +90,7 @@ class HeadShouldersStrategy:
         self.shoulder_prominence_ratio = shoulder_prominence_ratio
         self.shoulder_neck_bars = shoulder_neck_bars
         self.triple_head_tolerance_ratio = triple_head_tolerance_ratio
+        self.double_head_tolerance_ratio = double_head_tolerance_ratio
         self.max_shoulder_head_span_ratio = max_shoulder_head_span_ratio
         self.confirmed_shoulders = confirmed_shoulders
         self._traded_patterns: dict[str, set[str]] = {}
@@ -282,6 +284,7 @@ class HeadShouldersStrategy:
         *,
         bottom: bool,
         closes: pd.Series | None = None,
+        double_head: bool = False,
     ) -> tuple[float, float] | None:
         """返回 (头部高度, 突破当下的颈线价)。对不上形态图就返回 None。"""
         n1, p1 = neck_l
@@ -318,9 +321,10 @@ class HeadShouldersStrategy:
             if abs(price_l - price_r) > self.max_shoulder_spread_ratio * abs(neck_head):
                 return None
             # 两肩到头的 K 线间距须大致对称，一侧超过另一侧 1.6 倍即不成立
+            # （双重底/顶的头天然更宽，跳过此闸）
             d_l = idx_h - idx_l
             d_r = idx_r - idx_h
-            if max(d_l, d_r) > self.max_shoulder_head_span_ratio * min(d_l, d_r):
+            if not double_head and max(d_l, d_r) > self.max_shoulder_head_span_ratio * min(d_l, d_r):
                 return None
             if closes is not None:
                 # 颈线被收盘价穿透说明锚点没取到真正的反弹极值，形态不成立
@@ -608,6 +612,24 @@ class HeadShouldersStrategy:
                     if neck_l is None or neck_r is None:
                         self._tr(idx_l, idx_h, idx_r, "neck_none")
                         continue
+                    # 双重底/顶：两个颈锚点之间还有一根与头价差 ≤0.25×头高的同向极值
+                    double_head = False
+                    neck_head_pre = self._line_at(
+                        neck_l[0], neck_l[1], neck_r[0], neck_r[1], idx_h
+                    )
+                    height_pre = (
+                        neck_head_pre - price_h if bottom else price_h - neck_head_pre
+                    )
+                    if height_pre > 0:
+                        tol_d = self.double_head_tolerance_ratio * height_pre
+                        peers = pivot_lows if bottom else pivot_highs
+                        span_lo, span_hi = sorted((neck_l[0], neck_r[0]))
+                        similar = [
+                            p
+                            for i, p in peers
+                            if span_lo < i < span_hi and abs(p - price_h) <= tol_d
+                        ]
+                        double_head = len(similar) >= 2
                     shaped = self._shape_ok(
                         price_l,
                         price_h,
@@ -619,6 +641,7 @@ class HeadShouldersStrategy:
                         neck_r,
                         bottom=bottom,
                         closes=pts,
+                        double_head=double_head,
                     )
                     if shaped is None:
                         self._tr(idx_l, idx_h, idx_r, "shape")
