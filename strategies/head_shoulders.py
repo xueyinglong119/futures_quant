@@ -42,8 +42,7 @@ class HeadShouldersStrategy:
     两肩都要明显离开颈线（≥0.3×形态高度）。右肩就是当前这根 K 线即出告警/开仓，
     不必等破颈线，也不再多走 pivot_order 根确认。
     strict_shape 质量闸：左右肩价差≤颈线1.5%、颈线斜率≤0.5%、两肩到头的 K 线间距比≤1.6×、
-    ≤2h 周期形态跨度≤5 个交易日、
-    ≤15m 周期形态内相邻 K 线间隙>130 分钟（跨收盘/夜盘）即拒；
+    ≤2h 周期形态跨度≤5 个交易日；
     同高度候选三元组取两肩价差最小者（经典对称本义）。
     肩部主导性：左肩须为其与头之间同向拐点极端；右肩之后若走出更极端的同向拐点，
     该形态在后续 K 线上自然不再成立。
@@ -68,8 +67,6 @@ class HeadShouldersStrategy:
         dominance_reaction_ratio: float = 3.0,
         max_span_sessions: int = 5,
         session_cap_max_duration_sec: int = 7200,
-        max_bar_gap_minutes: float = 130.0,
-        gap_rule_max_duration_sec: int = 900,
         shoulder_prominence_ratio: float = 0.25,
         max_shoulder_head_span_ratio: float = 1.6,
         confirmed_shoulders: bool = False,
@@ -91,8 +88,6 @@ class HeadShouldersStrategy:
         self.dominance_reaction_ratio = dominance_reaction_ratio
         self.max_span_sessions = max_span_sessions
         self.session_cap_max_duration_sec = session_cap_max_duration_sec
-        self.max_bar_gap_minutes = max_bar_gap_minutes
-        self.gap_rule_max_duration_sec = gap_rule_max_duration_sec
         self.shoulder_prominence_ratio = shoulder_prominence_ratio
         self.max_shoulder_head_span_ratio = max_shoulder_head_span_ratio
         self.confirmed_shoulders = confirmed_shoulders
@@ -632,17 +627,6 @@ class HeadShouldersStrategy:
                     if shaped is None:
                         self._tr(idx_l, idx_h, idx_r, "shape")
                         continue
-                    if (
-                        self.strict_shape
-                        and 0 < self.duration_sec <= self.gap_rule_max_duration_sec
-                    ):
-                        seg = pd.to_datetime(klines["datetime"].iloc[idx_l : last_idx + 1])
-                        gaps = seg.diff().dropna()
-                        if len(gaps) and float(
-                            gaps.max().total_seconds()
-                        ) > self.max_bar_gap_minutes * 60:
-                            self._tr(idx_l, idx_h, idx_r, "gap")
-                            continue
                     height, _neck_head = shaped
                     n1, p1 = neck_l
                     n2, p2 = neck_r

@@ -22,7 +22,6 @@ def replay_detail(
     bars: list[dict],
     strict: bool,
     *,
-    allow_session_gap: bool = False,
     pivot_order: int | None = None,
     prominence: float | None = None,
     no_time_gates: bool = False,
@@ -34,15 +33,11 @@ def replay_detail(
     if pivot_order is not None:
         # 只用于回测对比：缩短拐点左右确认根数
         strat.pivot_order = pivot_order
-    if allow_session_gap:
-        # 只用于回测对比：允许 1m/5m 形态跨 15:00→21:00 这类收盘断点
-        strat.max_bar_gap_minutes = float("inf")
     if prominence is not None:
         # 只用于回测对比：放宽肩突出门槛（默认 0.25×头高）
         strat.shoulder_prominence_ratio = prominence
     if no_time_gates:
-        # 只用于回测对比：去掉 130 分钟跨断点闸 + 5 交易日跨度闸
-        strat.max_bar_gap_minutes = float("inf")
+        # 只用于回测对比：去掉 5 交易日跨度闸
         strat.max_span_sessions = 10**9
     df_all = bars_to_strategy_df(bars)
     window = TF_CONFIGS[duration_sec].lookback_bars if duration_sec in TF_CONFIGS else 400

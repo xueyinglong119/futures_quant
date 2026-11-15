@@ -62,8 +62,8 @@ def _render(symbol: str, tf: int, sigs: list[dict], tdir: Path, prefix: str, con
     return meta
 
 
-def _job(job: tuple[str, int, int, str, bool, int, int, float, bool, bool]) -> dict:
-    symbol, tf, days, outdir, allow_gap, pivot_order, load_days, prominence, no_time_gates, confirmed_shoulders = job
+def _job(job: tuple[str, int, int, str, int, int, float, bool, bool]) -> dict:
+    symbol, tf, days, outdir, pivot_order, load_days, prominence, no_time_gates, confirmed_shoulders = job
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     label = DURATION_LABELS.get(tf, str(tf))
     conn = connect()
@@ -97,7 +97,6 @@ def _job(job: tuple[str, int, int, str, bool, int, int, float, bool, bool]) -> d
                 tf,
                 bars,
                 True,
-                allow_session_gap=allow_gap,
                 pivot_order=pivot_order or None,
                 prominence=prominence or None,
                 no_time_gates=no_time_gates,
@@ -142,11 +141,6 @@ def main() -> None:
     ap.add_argument("--tfs", type=str, default=",".join(str(t) for t in DEFAULT_TFS))
     ap.add_argument("--symbols", type=str, default=",".join(DEFAULT_SYMBOLS))
     ap.add_argument(
-        "--allow-session-gap",
-        action="store_true",
-        help="回测对比用：放开 1m/5m 形态跨收盘断点（实盘口径不变）",
-    )
-    ap.add_argument(
         "--pivot-override",
         type=str,
         default="",
@@ -167,7 +161,7 @@ def main() -> None:
     ap.add_argument(
         "--no-time-gates",
         action="store_true",
-        help="回测对比用：去掉 130 分钟跨断点闸 + 5 交易日跨度闸（实盘口径不变）",
+        help="回测对比用：去掉 5 交易日跨度闸（130 分钟间隙闸已移除；实盘口径不变）",
     )
     ap.add_argument(
         "--confirmed-shoulders",
@@ -205,11 +199,7 @@ def main() -> None:
                     else (
                         "backtest_time"
                         if args.no_time_gates
-                        else (
-                            "backtest_gap"
-                            if args.allow_session_gap
-                            else ("backtest_prom" if args.prominence else "backtest")
-                        )
+                        else ("backtest_prom" if args.prominence else "backtest")
                     )
                 )
             )
@@ -220,7 +210,7 @@ def main() -> None:
 
     jobs = [
         (
-            s, tf, args.days, str(outdir), args.allow_session_gap,
+            s, tf, args.days, str(outdir),
             pivots.get(tf, 0), args.load_days, args.prominence, args.no_time_gates,
             args.confirmed_shoulders,
         )
@@ -235,7 +225,6 @@ def main() -> None:
         f"[backtest] 品种 {len(symbols)} × 周期 {tfs} × {args.days} 天，"
         f"预热 {args.load_days or '按周期'} 天，"
         f"workers={args.workers}，作业 {len(jobs)}，"
-        f"跨断点={'放开(仅回测)' if args.allow_session_gap else '按实盘'}，"
         f"枢轴={piv_desc}{'(仅回测)' if pivots else ''}，"
         f"肩突出={args.prominence or 0.25:g}h{'(仅回测)' if args.prominence else ''}，"
         f"时间闸={'去掉(仅回测)' if args.no_time_gates else '按实盘'}，"
@@ -264,7 +253,6 @@ def main() -> None:
         },
         "symbols": symbols,
         "tfs": tfs,
-        "allow_session_gap": args.allow_session_gap,
         "pivot_overrides": {DURATION_LABELS.get(k, str(k)): v for k, v in pivots.items()},
         "shoulder_prominence_ratio": args.prominence or 0.25,
         "no_time_gates": args.no_time_gates,
@@ -336,19 +324,13 @@ def main() -> None:
             else (
                 "/backtest/time"
                 if args.no_time_gates
-                else (
-                    "/backtest/gap"
-                    if args.allow_session_gap
-                    else ("/backtest/prom" if args.prominence else "/backtest")
-                )
+                else ("/backtest/prom" if args.prominence else "/backtest")
             )
         )
     )
     mods = []
     if pivots:
         mods.append(f"枢轴{piv_desc}")
-    if args.allow_session_gap:
-        mods.append("放开跨断点")
     if args.prominence:
         mods.append(f"肩突出{args.prominence:g}h")
     if args.no_time_gates:

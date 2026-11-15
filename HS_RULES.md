@@ -13,7 +13,7 @@
 | 肩离颈 | 两肩各 ≥ **0.3×形态高度**（原 0.4×） | `:297` `:299` |
 | 颈线拐点 | 离肩、离头**各至少 1 根**即可（原来贴肩的那根不算） | `:459` `gap = 1` |
 | 颈线穿透闸 | strict 下两锚点之间**收盘价不得穿透颈线超过 0.1×头高**（锚点没取到真反弹极值时线会穿 K 线，形态不成立） | `head_shoulders.py` `_shape_ok` 末段 |
-| 其余质量闸 | 高度/价 ≥0.008、颈线斜率 ≤0.25h（原 0.5h，锚点落在急跌/急拉远端时线贴趋势走）、头肩高差 ≥0.25h、两肩差 ≤0.5h；strict 下两肩差 ≤1.5%·颈线、斜率 ≤0.5%·颈线；跨度 ≤5 交易日；≤15m 周期相邻间隙 >130 分钟即拒 | `core/hs_monitor.py:62` `make_strategy`、`head_shoulders.py:612` |
+| 其余质量闸 | 高度/价 ≥0.008、颈线斜率 ≤0.25h（原 0.5h，锚点落在急跌/急拉远端时线贴趋势走）、头肩高差 ≥0.25h、两肩差 ≤0.5h；strict 下两肩差 ≤1.5%·颈线、斜率 ≤0.5%·颈线；跨度 ≤5 交易日（2026-11-15 按用户指示移除「≤15m 相邻间隙 >130 分钟」闸：该闸按自然时间算，把夜盘收盘/跨时段误算成形态内间隙） | `core/hs_monitor.py:62` `make_strategy`、`head_shoulders.py:612` |
 | 周期参数 | 30m `pivot_order=4 / min_span=10 / max_span=110 / lookback=300`；1h `3/8/110/250`；2h `3/6/110/200`；1m `8/25/110/500`；5m `6/20/110/400`；1d `2/8/110/220` | `core/hs_monitor.py:52` `TF_CONFIGS` |
 | 去重键 | 用 **K 线时刻**（`kind:左肩时刻:头时刻:右肩时刻` + `kind-head:头时刻`），不是窗口相对下标 | `head_shoulders.py:566` |
 | 图上颈线 | 锚点同样取收盘价，与量化口径一致 | `core/hs_chart.py:119` `pick = "close"` |
@@ -58,7 +58,7 @@ docker run -d --rm --name ab_hs_1 --env-file .env -e HS_AB_SHARD=1/2 -e HS_AB_TF
 - 容器 `Up ... (unhealthy)` 是镜像 healthcheck 在探 `:8000/health`，跑脚本的容器不起 HTTP，**必红，不是挂了**，别 stop。
 - 拆片前先 `docker stats --no-stream` 看内存；2C2G 上两片并行约 112MiB/片，安全。
 
-批量回测入口是 `scripts/run_backtest.py`，其中三个开关**只影响回测、实盘口径不变**：`--allow-session-gap`（放开 1m/5m 跨收盘断点）、`--pivot-override 300:1`（按周期改拐点确认根数）、`--load-days N`（覆盖各周期预热窗口，`run_backtest.py:45` 的默认表是 1m/5m=60、30m=90、1h=120、2h=150、1d=300）。
+批量回测入口是 `scripts/run_backtest.py`，其中两个开关**只影响回测、实盘口径不变**：`--pivot-override 300:1`（按周期改拐点确认根数）、`--load-days N`（覆盖各周期预热窗口，`run_backtest.py:45` 的默认表是 1m/5m=60、30m=90、1h=120、2h=150、1d=300）。
 
 ## 4. 部署与看结果
 
