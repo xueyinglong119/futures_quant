@@ -42,7 +42,7 @@ class HeadShouldersStrategy:
     形态点位（肩、头、颈线拐点）一律按收盘价量，蜡烛高低点只用于风控摆动。
     两肩都要明显离开颈线（1m 颈线锚点离肩≥3 根，其余 ≥1 根，且肩在颈线正确一侧）。肩取两侧确认的局部极值，
     右肩确认（pivot_order 根）后出告警/开仓。
-    strict_shape 质量闸：左右肩价差≤颈线1.5%、两肩到头的 K 线间距比≤1.6×；
+    strict_shape 质量闸：左右肩价差≤颈线1.5%、两肩到头的 K 线间距比≤4×（双重/平台/三重头跳过）；
     头到颈线至少 10 个价格点（且 ≥0.8% 价格），太浅的形态不成立；
     两肩价差最小的候选优先，其次取最早的合格右肩，再次左右腿最均衡的，最后头高。
     肩部主导性：左肩须为其与头之间同向拐点极端；右肩之后若走出更极端的同向拐点，
@@ -72,7 +72,7 @@ class HeadShouldersStrategy:
         triple_head_tolerance_ratio: float = 0.25,
         double_head_tolerance_ratio: float = 0.25,
         flat_head_min_bars: int = 4,
-        max_shoulder_head_span_ratio: float = 1.6,
+        max_shoulder_head_span_ratio: float = 4.0,
         confirmed_shoulders: bool = True,
     ):
         self.pivot_order = pivot_order
@@ -327,8 +327,8 @@ class HeadShouldersStrategy:
         if self.strict_shape:
             if abs(price_l - price_r) > self.max_shoulder_spread_ratio * abs(neck_head):
                 return None
-            # 两肩到头的 K 线间距须大致对称，一侧超过另一侧 1.6 倍即不成立
-            # （双重底/顶的头天然更宽，跳过此闸）
+            # 两肩到头的 K 线间距比 ≤4.0（原 1.6，2026-11-15 用户要求放宽）
+            # （双重底/顶、平台头天然更宽，跳过此闸）
             d_l = idx_h - idx_l
             d_r = idx_r - idx_h
             if not double_head and max(d_l, d_r) > self.max_shoulder_head_span_ratio * min(d_l, d_r):
