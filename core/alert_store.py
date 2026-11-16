@@ -87,13 +87,23 @@ def list_alerts(
     limit: int = 50,
     unread_only: bool = False,
     duration: str | None = None,
+    provisional: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """`duration` 是周期标签（如 "5m"），只按 `extra.duration` 精确过滤。"""
+    """`duration` 是周期标签（如 "5m"），只按 `extra.duration` 精确过滤。
+
+    `provisional` 为 True 只要收盘前的抢跑告警，False 只要已收线的，None 不限。
+    """
     with _LOCK:
         data = _load()
     alerts = data["alerts"]
     if duration:
         alerts = [a for a in alerts if (a.get("extra") or {}).get("duration") == duration]
+    if provisional is not None:
+        alerts = [
+            a
+            for a in alerts
+            if bool((a.get("extra") or {}).get("provisional")) == provisional
+        ]
     if unread_only:
         alerts = [a for a in alerts if not a.get("read")]
     return alerts[: max(1, min(limit, 200))]

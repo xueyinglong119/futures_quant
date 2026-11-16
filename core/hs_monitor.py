@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -37,6 +37,22 @@ HS_MONITOR_DURATIONS: tuple[int, ...] = (
     DURATION_2H,
     DURATION_1D,
 )
+
+# 收盘前抢跑：日盘 14:45、夜盘 22:30 之后，最后几根会话 K 还是半截的。
+# 这段时间用未收线的半截 K 提前提醒右肩，免得等到 15:00/23:00 收线才告警已经买不到。
+PROVISIONAL_DURATIONS: tuple[int, ...] = (DURATION_30M, DURATION_1H, DURATION_2H)
+PROVISIONAL_WINDOWS: tuple[tuple[time, time], ...] = (
+    (time(14, 45), time(15, 0)),
+    (time(22, 30), time(23, 0)),
+)
+
+
+def in_provisional_window(now: datetime) -> bool:
+    hm = now.hour * 60 + now.minute
+    return any(
+        start.hour * 60 + start.minute <= hm < end.hour * 60 + end.minute
+        for start, end in PROVISIONAL_WINDOWS
+    )
 
 
 @dataclass(frozen=True)
@@ -150,10 +166,13 @@ def emit_alert(
     alert_log: Path | None = None,
     push: bool = True,
     toast: bool = True,
+    provisional: bool = False,
 ) -> str | None:
     """写告警并推送，返回告警 id，供模拟账户把这笔单和告警对上。"""
     label = DURATION_LABELS.get(duration_sec, str(duration_sec))
     name = get_display_name(symbol)
+    if provisional:
+        kind = f"{kind}·抢跑"
     title = f"{name} {label} {kind}"
     body = f"K线 {when.strftime('%m-%d %H:%M')} | {reason}"
     print(f"!!! HS_ALERT !!! {title} | {symbol} | {body}", flush=True)
@@ -175,6 +194,9 @@ def emit_alert(
         "name": name,
         "display": f"{name}({symbol})",
     }
+    if provisional:
+        # App 的「抢跑」标签页只取带这个标记的告警
+        extra["provisional"] = True
     if detail:
         extra["detail"] = detail
 
@@ -310,6 +332,7 @@ class HsMonitorEngine:
         alert_log: Path | None = None,
         push: bool = True,
         toast: bool = False,
+        provisional: bool = False,
     ) -> int:
         """发告警 + 通知模拟账户，同一 (品种周期, 类型, K线时刻, reason) 只发一次。"""
         key = self._key(det.symbol, det.duration_sec)
@@ -327,6 +350,7 @@ class HsMonitorEngine:
             alert_log=alert_log,
             push=push,
             toast=toast,
+            provisional=provisional,
         )
         if self.on_signal is not None:
             try:

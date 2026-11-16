@@ -265,7 +265,7 @@ function moneyText(value: number | null | undefined): string {
 }
 
 function App() {
-  const [tab, setTab] = useState<"alerts" | "board">("alerts");
+  const [tab, setTab] = useState<"alerts" | "prov" | "board">("alerts");
   const [apiBase, setApiBase] = useState(DEFAULT_API);
   const [apiInput, setApiInput] = useState(DEFAULT_API);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
@@ -277,9 +277,11 @@ function App() {
   const [boardError, setBoardError] = useState("");
   const [boardLoading, setBoardLoading] = useState(false);
   const [tf, setTf] = useState("");
+  const [provOnly, setProvOnly] = useState(false);
   const knownIds = useRef<Set<string>>(new Set());
   const seeded = useRef(false);
   const tfRef = useRef("");
+  const provRef = useRef(false);
   const appState = useRef(AppState.currentState);
 
   const base = useMemo(() => apiBase.replace(/\/$/, ""), [apiBase]);
@@ -301,7 +303,9 @@ function App() {
   const fetchAlerts = useCallback(async () => {
     try {
       const dur = tfRef.current;
-      const query = dur ? `&duration=${encodeURIComponent(dur)}` : "";
+      const query =
+        (dur ? `&duration=${encodeURIComponent(dur)}` : "") +
+        (provRef.current ? "&provisional=1" : "");
       const resp = await fetch(`${base}/api/alerts?limit=50${query}`);
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`);
@@ -361,6 +365,14 @@ function App() {
     }
   }, [base]);
 
+  const openAlertTab = (prov: boolean) => {
+    provRef.current = prov;
+    setProvOnly(prov);
+    setTab(prov ? "prov" : "alerts");
+    setLoading(true);
+    fetchAlerts();
+  };
+
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
@@ -391,8 +403,11 @@ function App() {
         <Text style={styles.brand}>期货形态告警</Text>
         <Text style={styles.sub}>头肩顶 / 头肩底 · 实时通知</Text>
         <View style={styles.tabs}>
-          <Pressable style={[styles.tab, tab === "alerts" ? styles.tabOn : null]} onPress={() => setTab("alerts")}>
+          <Pressable style={[styles.tab, tab === "alerts" ? styles.tabOn : null]} onPress={() => openAlertTab(false)}>
             <Text style={styles.tabText}>告警</Text>
+          </Pressable>
+          <Pressable style={[styles.tab, tab === "prov" ? styles.tabOn : null]} onPress={() => openAlertTab(true)}>
+            <Text style={styles.tabText}>抢跑</Text>
           </Pressable>
           <Pressable
             style={[styles.tab, tab === "board" ? styles.tabOn : null]}
@@ -471,9 +486,20 @@ function App() {
               data={alerts}
               keyExtractor={(item) => item.id}
               contentContainerStyle={styles.list}
+              ListHeaderComponent={
+                provOnly ? (
+                  <Text style={styles.meta}>
+                    抢跑＝收盘前 15 分钟拿还没收线的 30m/1h/2h 半截 K 提前预警，只提醒不开仓；到收线形态仍可能走样。
+                  </Text>
+                ) : null
+              }
               ListEmptyComponent={
                 <Text style={styles.empty}>
-                  {tf ? `「${tf}」周期暂无告警。` : "暂无告警。新形态出现后会推到这里和通知栏。"}
+                  {provOnly
+                    ? "暂无抢跑提醒。日盘 14:45–15:00、夜盘 22:30–23:00 才会产生。"
+                    : tf
+                      ? `「${tf}」周期暂无告警。`
+                      : "暂无告警。新形态出现后会推到这里和通知栏。"}
                 </Text>
               }
               renderItem={({ item }) => <AlertCard item={item} base={base} />}

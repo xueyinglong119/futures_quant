@@ -395,8 +395,14 @@ def api_list_alerts(
     limit: int = Query(50, ge=1, le=200),
     unread_only: bool = Query(False),
     duration: str | None = Query(None),
+    provisional: bool | None = Query(None),
 ) -> dict[str, Any]:
-    items = list_alerts(limit=limit, unread_only=unread_only, duration=duration)
+    items = list_alerts(
+        limit=limit,
+        unread_only=unread_only,
+        duration=duration,
+        provisional=provisional,
+    )
     for item in items:
         symbol = str(item.get("symbol") or "")
         extra = item.get("extra") or {}
@@ -424,9 +430,18 @@ def api_alert_execution(alert_id: str) -> dict[str, Any]:
     """告警对应的模拟执行情况：开仓价/手数/止盈止损/浮动或净盈亏。"""
     conn = connect()
     try:
-        return alert_execution(conn, alert_id.strip())
+        result = alert_execution(conn, alert_id.strip())
     finally:
         conn.close()
+    if not result.get("opened"):
+        alert = next(
+            (a for a in list_alerts(limit=1000) if a.get("id") == alert_id.strip()),
+            None,
+        )
+        if alert and (alert.get("extra") or {}).get("provisional"):
+            # 抢跑本来就不开仓，别套「资金不够/已有持仓」这句默认解释
+            result["note"] = "抢跑提醒只预警，按设计不开仓；收线后另有正式告警"
+    return result
 
 
 @app.get("/api/alerts/{alert_id}/chart.png")

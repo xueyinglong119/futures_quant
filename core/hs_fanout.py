@@ -37,6 +37,7 @@ class KeyResult:
     bar: dict[str, float]
     det: Detection | None
     ms: float
+    prov: bool = False
 
 
 def shard_of(symbol: str, count: int) -> int:
@@ -60,7 +61,13 @@ def last_bar_of(df: pd.DataFrame) -> tuple[datetime, dict[str, float]]:
 
 
 def detect_one(
-    engine: HsMonitorEngine, conn: Any, symbol: str, duration_sec: int
+    engine: HsMonitorEngine,
+    conn: Any,
+    symbol: str,
+    duration_sec: int,
+    *,
+    force: bool = False,
+    prov: bool = False,
 ) -> KeyResult | None:
     """取数 + 算形态，不发告警。数据为空返回 None。"""
     t0 = time.perf_counter()
@@ -68,7 +75,7 @@ def detect_one(
     if df is None or df.empty:
         return None
     last_dt, bar = last_bar_of(df)
-    det = engine.detect(symbol, duration_sec, df)
+    det = engine.detect(symbol, duration_sec, df, force=force)
     return KeyResult(
         symbol=symbol,
         duration_sec=duration_sec,
@@ -76,12 +83,18 @@ def detect_one(
         bar=bar,
         det=det,
         ms=(time.perf_counter() - t0) * 1000.0,
+        prov=prov,
     )
 
 
 def _worker_loop(shard: int, task_q, out_q) -> None:
-    """子进程主循环：一批键进来，一批结果出去。"""
+    """子进程主循环：一批键进来，一批结果出去。
+
+    抢跑键走独立引擎：半截 K 的结构不能进正式路径的 `_traded_patterns`，
+    否则抢跑提醒会把真正收线那根的告警一起吃掉。
+    """
     engine = HsMonitorEngine()
+    prov_engine = HsMonitorEngine()
     conn = None
     while True:
         item = task_q.get()
@@ -90,12 +103,19 @@ def _worker_loop(shard: int, task_q, out_q) -> None:
         seq, keys = item
         results: list[KeyResult] = []
         strikes = 0
-        for symbol, duration_sec in keys:
+        for symbol, duration_sec, prov in keys:
             try:
                 if conn is None:
                     conn = connect()
                     ensure_table(conn)
-                res = detect_one(engine, conn, symbol, duration_sec)
+                res = detect_one(
+                    prov_engine if prov else engine,
+                    conn,
+                    symbol,
+                    duration_sec,
+                    force=prov,
+                    prov=prov,
+                )
                 if res is not None:
                     results.append(res)
                 strikes = 0
@@ -164,8 +184,14 @@ class HsFanout:
             flush=True,
         )
 
-    def detect(self, keys: list[tuple[str, int]]) -> list[KeyResult] | None:
-        """把 keys 按品种分到各片，收齐结果。返回 None 表示需要调用方串行兜底。"""
+    def detect(
+        self, keys: list[tuple[str, int, bool]]
+    ) -> list[KeyResult] | None:
+        """把 keys 按品种分到各片，收齐结果。返回 None 表示需要调用方串行兜底。
+
+        键是 (品种, 周期, 是否抢跑)：一次往返里把常规键和抢跑键一起发出去，
+        否则父进程要串行等两轮。
+        """
         if not keys:
             return []
         if self.broken:
@@ -174,9 +200,9 @@ class HsFanout:
             self._broke("worker 已退出")
             return None
 
-        buckets: list[list[tuple[str, int]]] = [[] for _ in range(self.count)]
-        for symbol, duration_sec in keys:
-            buckets[shard_of(symbol, self.count)].append((symbol, duration_sec))
+        buckets: list[list[tuple[str, int, bool]]] = [[] for _ in range(self.count)]
+        for symbol, duration_sec, prov in keys:
+            buckets[shard_of(symbol, self.count)].append((symbol, duration_sec, prov))
 
         self._seq += 1
         seq = self._seq
