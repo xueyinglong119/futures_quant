@@ -119,7 +119,8 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 - 验证真进容器：`docker compose exec futures-monitor grep -c <新函数名> /app/core/paper_trade.py`（`grep -c` 数匹配行数，只出现一次时期望值就是 `1`）。
 - `docker compose logs futures-monitor`（和 ingest）**永远是空的，不是故障**——stdout 被重定向进 `reports/*.log`，用 `tail -n 40 reports/monitor.log`。
 - 分片并发数走 `HS_WORKERS`（`.env` 或 compose `environment:`），改这个**只需 `docker compose up -d futures-monitor` 重建容器，不用 `--build`**；设成 1 等于关掉分片。生产是 4 核、ingest 常态吃掉 1 核，3 是当前的折中。
-- 分片上线后的日志标记（11-16 11:48 生产实测）：`[monitor] 检测分片已启动 workers=3` → 启动行 `poll=0.5s workers=3（只读库，不订 K 线）` → 开盘后第一轮才有 `水位预热 … loaded=… in …s` 和 `本轮扫描 keys=… 用时 …s`。`docker top futures-quant-monitor | grep -c spawn_main` 期望 3。**免责条款每次启动多打 3 行不是重启循环**，是 3 个 spawn 子进程各自 import tqsdk。午休/收盘后只有 `休市 …, 15s 后再检查`，此时看不到扫描行属正常。
+- 分片上线后的日志标记（11-16 11:48 部署、13:30 开盘实测）：`[monitor] 检测分片已启动 workers=3` → 启动行 `poll=0.5s workers=3（只读库，不订 K 线）` → 开盘后第一轮 `水位预热 … loaded=… in …s keys=… sum=…s max=…`，之后每次有键要算都打 `本轮扫描 pending=… keys=… sum=… 用时 …s`。`docker top futures-quant-monitor | grep -c spawn_main` 期望 3。**免责条款每次启动多打 3 行不是重启循环**，是 3 个 spawn 子进程各自 import tqsdk。午休/收盘后只有 `休市 …, 15s 后再检查`，此时看不到扫描行属正常。
+  扫描行原本挂了 `scan_sec >= 1.0` 阈值，分片后单轮普遍 <1s 就**一条都不打**（13:30 那批就是这样，只能反推「没打=都很快」）；已改成每轮必打，并把 `pending=` 一起带上区分「算了几键」和「几键拿到了数据」。
 - 画廊路由（只有生产机有 HTTP）：`/backtest`、`/backtest/killed`、`/backtest/pivot`、`/backtest/prom`、`/backtest/neck`。路由只是读 `reports/<变体>/gallery_*.html`，缺文件就 404 且 detail 写明缺哪个；在别的机器跑出来的要先 `scp -r` 到生产机 `/opt/futures_quant/reports/`，**到位后不用重启任何容器**。
 - 生产 sshd 只认密钥（`PasswordAuthentication no`，报 `Permission denied (publickey...)` 且不问密码不是输错）。老机→生产机已互信。
 
@@ -134,4 +135,4 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 - **5m 与 1d 只有 89 个品种有数据，1m 有 130**（同一张水位表）。差额应是「历史回填写过的品种」多于「实时订阅的品种」——用 `grep "品种" reports/ingest.log | tail -3` 核 `list_commodity_mains` 返回的数量；若确实只有 89，那这 41 个品种的 5m/1d **永远不出告警**，要覆盖得补历史或加订阅。
 - ingest 常态就是 ≈ 单核打满（`docker stats` 5 次采样 90.8/95.9/100.0/99.7/100.0%，4 核约 25%；monitor 则是分钟边界脉冲，同一批采样 27.0/0.7/23.0/1.0/21.3%，api 0.06%）。主因已定位：`serial_to_rows` 用 `klines.iloc[i]["col"]` 逐行取标量，**60 行的 1m 序列一次实测 25.8 ms**；按单核打满反推 ≈ 每秒 35–39 次调用（每 0.25s 圈约 9 条序列被 `is_changing` 判为变化），数字自洽。降载两档：向量化取列（输出逐行一致，实测 5.5 ms，→ 约 20% 单核）、或只解析水位之后的行（调用方本就按 watermark 过滤，可 <1 ms，→ 个位数百分比，但要连带核 `correction`/半截K 判定）。**不改告警语义**，且 ingest 是 `enable_monitor=False` 不跑策略——所以告警口径怎么改都不影响它，别把 CPU 变化算成规则改动的功劳。
 - 开仓时点：一年基线和 30 天贴收盘（仅 2 条、竞价逆向选择）都**否定**了抢收盘跳空，规则未改。
-- **3 进程分片已于 11-16 11:48 上生产**（本机实测 3.0×，台账 #35）。待验收：①开盘后 `本轮扫描 keys=… 用时 …s` 的实际秒数；②工作时段分钟边界的 `docker stats`——预期 monitor 占 3 核、脉冲更尖，ingest（常态约 1 核）不能被挤到掉数据。③告警「发现时间」是否随扫描变短而下降。要再压一个量级仍是「每键重取 500 根」→ 按键缓存 frame + 增量取数。
+- **3 进程分片已上生产并验收通过（11-16 13:30 开盘）**：预热 261 键 `sum=12.64s` → 墙钟 `4.7s` = **2.69×**；13:30/13:35 的告警轮**一条 `本轮扫描` 都没打**（阈值 1s）⇒ 单轮全部 <1s，改造前这批键是秒级起步。告警口径不变（`右(...) 时刻 = K线时刻`）。资源：monitor MEM 153.8→**479.8 MiB（+326）**、PIDS 9→37、CPU 1.77%，**ingest 20.47% 未被抢**。剩下两档：①每键重取 500 根 → 按键缓存 frame + 增量取数；②新扫描行（每轮必打）要等下次 `--build` 部署才生效。

@@ -218,9 +218,10 @@ class DbHsMonitor:
                     flush=True,
                 )
             alerts += n
-        if scan_sec >= 1.0:
-            print(
-                f"[monitor] 本轮扫描 {self._scan_stats(results)} 用时 {scan_sec:.2f}s",
-                flush=True,
-            )
+        # 每轮都打：分片后单轮普遍 <1s，按秒数设阈值会把要看的数正好滤掉
+        print(
+            f"[monitor] 本轮扫描 pending={len(pending)} "
+            f"{self._scan_stats(results)} 用时 {scan_sec:.2f}s",
+            flush=True,
+        )
         return alerts
