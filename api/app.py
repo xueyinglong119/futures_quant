@@ -394,8 +394,9 @@ def api_paper_close(trade_id: int = Query(..., ge=1, description="持仓单号")
 def api_list_alerts(
     limit: int = Query(50, ge=1, le=200),
     unread_only: bool = Query(False),
+    duration: str | None = Query(None),
 ) -> dict[str, Any]:
-    items = list_alerts(limit=limit, unread_only=unread_only)
+    items = list_alerts(limit=limit, unread_only=unread_only, duration=duration)
     for item in items:
         symbol = str(item.get("symbol") or "")
         extra = item.get("extra") or {}

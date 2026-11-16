@@ -83,10 +83,17 @@ def add_alert(
     return alert
 
 
-def list_alerts(limit: int = 50, unread_only: bool = False) -> list[dict[str, Any]]:
+def list_alerts(
+    limit: int = 50,
+    unread_only: bool = False,
+    duration: str | None = None,
+) -> list[dict[str, Any]]:
+    """`duration` 是周期标签（如 "5m"），只按 `extra.duration` 精确过滤。"""
     with _LOCK:
         data = _load()
     alerts = data["alerts"]
+    if duration:
+        alerts = [a for a in alerts if (a.get("extra") or {}).get("duration") == duration]
     if unread_only:
         alerts = [a for a in alerts if not a.get("read")]
     return alerts[: max(1, min(limit, 200))]

@@ -112,6 +112,8 @@ type BoardData = {
 
 const STORAGE_API = "fq_api_base";
 const DEFAULT_API = "http://127.0.0.1:8000";
+// 告警列表的周期筛选，"" 表示全部；与后端 DURATION_LABELS 的标签一致
+const TF_CHIPS = ["", "1m", "5m", "30m", "1h", "2h", "1d"];
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -274,8 +276,10 @@ function App() {
   const [board, setBoard] = useState<BoardData | null>(null);
   const [boardError, setBoardError] = useState("");
   const [boardLoading, setBoardLoading] = useState(false);
+  const [tf, setTf] = useState("");
   const knownIds = useRef<Set<string>>(new Set());
   const seeded = useRef(false);
+  const tfRef = useRef("");
   const appState = useRef(AppState.currentState);
 
   const base = useMemo(() => apiBase.replace(/\/$/, ""), [apiBase]);
@@ -296,7 +300,9 @@ function App() {
 
   const fetchAlerts = useCallback(async () => {
     try {
-      const resp = await fetch(`${base}/api/alerts?limit=50`);
+      const dur = tfRef.current;
+      const query = dur ? `&duration=${encodeURIComponent(dur)}` : "";
+      const resp = await fetch(`${base}/api/alerts?limit=50${query}`);
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`);
       }
@@ -436,18 +442,44 @@ function App() {
           onSelect={(day) => fetchBoard(day)}
           onClosed={() => fetchBoard(boardDay || undefined)}
         />
-      ) : loading ? (
-        <ActivityIndicator color="#E8B86D" style={{ marginTop: 24 }} />
       ) : (
-        <FlatList
-          data={alerts}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.list}
-          ListEmptyComponent={
-            <Text style={styles.empty}>暂无告警。新形态出现后会推到这里和通知栏。</Text>
-          }
-          renderItem={({ item }) => <AlertCard item={item} base={base} />}
-        />
+        <>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={[styles.dayRow, { paddingHorizontal: 16 }]}
+          >
+            {TF_CHIPS.map((label) => (
+              <Pressable
+                key={label || "all"}
+                style={[styles.dayChip, tf === label ? styles.dayChipOn : null]}
+                onPress={() => {
+                  tfRef.current = label;
+                  setTf(label);
+                  setLoading(true);
+                  fetchAlerts();
+                }}
+              >
+                <Text style={styles.dayText}>{label || "全部"}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+          {loading ? (
+            <ActivityIndicator color="#E8B86D" style={{ marginTop: 24 }} />
+          ) : (
+            <FlatList
+              data={alerts}
+              keyExtractor={(item) => item.id}
+              contentContainerStyle={styles.list}
+              ListEmptyComponent={
+                <Text style={styles.empty}>
+                  {tf ? `「${tf}」周期暂无告警。` : "暂无告警。新形态出现后会推到这里和通知栏。"}
+                </Text>
+              }
+              renderItem={({ item }) => <AlertCard item={item} base={base} />}
+            />
+          )}
+        </>
       )}
     </SafeAreaView>
   );
