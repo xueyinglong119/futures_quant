@@ -153,7 +153,7 @@
     三条不变量：**副作用只在父进程**（`alerts.json` 的锁是进程内的、TqApi 不能跨进程，所以 worker 只回传 `Detection` + 最后一根 OHLC，模拟盘省一次查库靠这根回传的 bar）；**分片键用品种不用 (品种, 周期)**（同品种各周期落同一片，策略实例与 `_traded_patterns` 不跨进程漂）；**用 `zlib.crc32` 不用 `hash()`**（后者每进程加盐，父进程算出的片和子进程理解不上）。
     兜底：`HS_WORKERS`（默认 3）<2 直接串行；worker 退出 / 超 `HS_WORKER_TIMEOUT=30s` 没回 / 结果序号或条数不符 → 置 `broken`，本轮起整体退回串行；worker 内连库失败累计 3 次（`MAX_STRIKE`）就中断本批、故意报条数不符让父进程兜底。`HsFanout` 构造即 spawn，故只在 `run_forever` 里 TqApi 与库都起来后才建（外层重启循环每 15s new 一个 `DbHsMonitor`，早建会每次漏 3 个子进程）。
     等价性 + 收益（2026-11-16，`_hs_fanout_diff.py 40`，生产 RDS 只读，40 品种 × 6 周期 = 240 键，`emit_alert` 打桩）：**15 条告警逐条一致**（kind / K 线时刻 / reason / push / toast），结果对象两侧均 240；单批墙钟串行中位 **11.22s** → 分片稳态 **3.74s（3.00×）**，首轮含 worker 冷启动 8.55s；后续批次只出结果不出告警（去重回归）。`HS_WORKERS=1` 时 `detect()` 返回 None，正确退回串行。
-    未验证/待办：①**还没上生产**，生产 4 核里 ingest 常态吃掉约 1 核，3 worker 是否与它抢核要看 `docker stats`；预期分钟边界脉冲更尖、总 CPU 不变。②`spawn` 首轮冷启动（每 worker 首次 import + 连库）落在启动预热里，若重启后头一分钟有告警延迟异常先看预热行。③退回串行兜底时父进程的 `HeadShouldersStrategy` 实例是**冷的**（`_traded_patterns` 没历史），理论上可能对「worker 已就同一个头告过、但当前是新的一根」再补一条重复告警——只在分片坏掉的降级态发生，`_alerted` 挡不住（键含 last_dt）。没为此加代码，先记着。④下一档仍是「每键重取 500 根」→ 按键缓存 frame + 增量取数，没做。
+    未验证/待办：①**11-16 11:48 已上生产**（`grep -c class HsFanout`=1、`docker top | grep -c spawn_main`=3、日志有 `检测分片已启动 workers=3`）；当时正午休，`本轮扫描 …` 行要 13:30 后才出，生产秒数与「3 worker 是否抢 ingest 那 1 核」仍待工作时段实测。②`spawn` 首轮冷启动（每 worker 首次 import + 连库）落在启动预热里，若重启后头一分钟有告警延迟异常先看预热行。③退回串行兜底时父进程的 `HeadShouldersStrategy` 实例是**冷的**（`_traded_patterns` 没历史），理论上可能对「worker 已就同一个头告过、但当前是新的一根」再补一条重复告警——只在分片坏掉的降级态发生，`_alerted` 挡不住（键含 last_dt）。没为此加代码，先记着。④下一档仍是「每键重取 500 根」→ 按键缓存 frame + 增量取数，没做。
 
 ---
 
