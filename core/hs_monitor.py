@@ -203,6 +203,18 @@ def emit_alert(
     return alert_id
 
 
+@dataclass
+class Detection:
+    """一次「本根确认了新形态」的结果，不含任何副作用。"""
+
+    symbol: str
+    duration_sec: int
+    last_dt: datetime
+    kind: str
+    signal: Any
+    df: pd.DataFrame
+
+
 class HsMonitorEngine:
     """持久化策略实例，按 symbol+周期在新 K 线出现时检测一次。"""
 
@@ -250,6 +262,86 @@ class HsMonitorEngine:
             emit=emit,
         )
 
+    def detect(
+        self,
+        symbol: str,
+        duration_sec: int,
+        df: pd.DataFrame,
+        *,
+        force: bool = False,
+    ) -> Detection | None:
+        """只算形态：最后一根没变就跳过，变了才跑一次 `on_bar`。
+
+        不发告警、不推送、不开仓，也不碰 `_alerted`——这些副作用统一留给
+        `deliver`，好让检测能搬到子进程里跑。
+        """
+        if df is None or df.empty:
+            return None
+
+        key = self._key(symbol, duration_sec)
+        last_dt = pd.Timestamp(df.iloc[-1]["datetime"]).to_pydatetime()
+        if last_dt.tzinfo is not None:
+            last_dt = last_dt.replace(tzinfo=None)
+        last_dt = last_dt.replace(microsecond=0)
+        prev = self._last_bar_dt.get(key)
+        if not force and prev is not None and prev == last_dt:
+            return None
+
+        strategy = self._strategy(symbol, duration_sec)
+        signal = strategy.on_bar(df, max_volume=1, symbol=key)
+        self._last_bar_dt[key] = last_dt
+        if signal is None:
+            return None
+
+        kind = "头肩顶" if signal.action == "sell" else "头肩底"
+        return Detection(
+            symbol=symbol,
+            duration_sec=duration_sec,
+            last_dt=last_dt,
+            kind=kind,
+            signal=signal,
+            df=df,
+        )
+
+    def deliver(
+        self,
+        det: Detection,
+        *,
+        alert_log: Path | None = None,
+        push: bool = True,
+        toast: bool = False,
+    ) -> int:
+        """发告警 + 通知模拟账户，同一 (品种周期, 类型, K线时刻, reason) 只发一次。"""
+        key = self._key(det.symbol, det.duration_sec)
+        alert_key = f"{key}|{det.kind}|{det.last_dt.isoformat()}|{det.signal.reason}"
+        if alert_key in self._alerted:
+            return 0
+        self._alerted.add(alert_key)
+        alert_id = emit_alert(
+            symbol=det.symbol,
+            duration_sec=det.duration_sec,
+            kind=det.kind,
+            when=det.last_dt,
+            reason=det.signal.reason,
+            detail=getattr(det.signal, "detail", None),
+            alert_log=alert_log,
+            push=push,
+            toast=toast,
+        )
+        if self.on_signal is not None:
+            try:
+                self.on_signal(
+                    det.symbol,
+                    det.duration_sec,
+                    det.last_dt,
+                    det.df,
+                    det.signal,
+                    alert_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[paper] 开仓处理失败 {det.symbol}: {exc}", flush=True)
+        return 1
+
     def evaluate_df(
         self,
         symbol: str,
@@ -262,44 +354,10 @@ class HsMonitorEngine:
         force: bool = False,
         emit: bool = True,
     ) -> int:
-        """用给定的已收盘 K 线做一次检测。最后一根没变则跳过。"""
-        if df is None or df.empty:
+        """串行路径：用给定的已收盘 K 线做一次检测并按需告警。"""
+        det = self.detect(symbol, duration_sec, df, force=force)
+        if det is None or not emit:
             return 0
-
-        key = self._key(symbol, duration_sec)
-        last_dt = pd.Timestamp(df.iloc[-1]["datetime"]).to_pydatetime()
-        if last_dt.tzinfo is not None:
-            last_dt = last_dt.replace(tzinfo=None)
-        last_dt = last_dt.replace(microsecond=0)
-        prev = self._last_bar_dt.get(key)
-        if not force and prev is not None and prev == last_dt:
-            return 0
-
-        strategy = self._strategy(symbol, duration_sec)
-        signal = strategy.on_bar(df, max_volume=1, symbol=key)
-        self._last_bar_dt[key] = last_dt
-        if signal is None or not emit:
-            return 0
-
-        kind = "头肩顶" if signal.action == "sell" else "头肩底"
-        alert_key = f"{key}|{kind}|{last_dt.isoformat()}|{signal.reason}"
-        if alert_key in self._alerted:
-            return 0
-        self._alerted.add(alert_key)
-        alert_id = emit_alert(
-            symbol=symbol,
-            duration_sec=duration_sec,
-            kind=kind,
-            when=last_dt,
-            reason=signal.reason,
-            detail=getattr(signal, "detail", None),
-            alert_log=alert_log,
-            push=push,
-            toast=toast,
+        return self.deliver(
+            det, alert_log=alert_log, push=push, toast=toast
         )
-        if self.on_signal is not None:
-            try:
-                self.on_signal(symbol, duration_sec, last_dt, df, signal, alert_id)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[paper] 开仓处理失败 {symbol}: {exc}", flush=True)
-        return 1

@@ -16,13 +16,13 @@ from tqsdk import TqApi, TqAuth
 
 from config.settings import Settings, load_settings
 from core.cont_symbols import list_commodity_mains
-from core.hs_monitor import HS_MONITOR_DURATIONS, HsMonitorEngine, load_tf_df
+from core.hs_fanout import HsFanout, KeyResult, detect_one
+from core.hs_monitor import HS_MONITOR_DURATIONS, HsMonitorEngine
 from core.kline_store import (
     DURATION_LABELS,
     connect,
     ensure_table,
     list_symbols,
-    load_bars,
     load_watermarks,
 )
 from core.paper_trade import PaperBroker
@@ -49,6 +49,8 @@ class DbHsMonitor:
         self.alert_log = alert_log
         self.poll_sec = poll_sec
         self.engine = HsMonitorEngine()
+        # 子进程在 run_forever 里、api 与库都起来之后才拉起（见那里）。
+        self.fanout: HsFanout | None = None
         self.broker: PaperBroker | None = None
         self._seen: dict[tuple[str, int], datetime] = {}
         self._primed = False
@@ -60,6 +62,13 @@ class DbHsMonitor:
         ensure_table(conn)
         self.engine.on_signal = None
         try:
+            # 分片 worker 在 HsFanout 构造时就 spawn，所以必须等 api 和库都起来之后再拉：
+            # 启动失败的出路是外层循环 15s 后新建一个 DbHsMonitor，提前 spawn 会每次漏 3 个子进程。
+            self.fanout = HsFanout()
+        except Exception:
+            traceback.print_exc()
+            self.fanout = None
+        try:
             self.broker = PaperBroker(conn, api)
             self.engine.on_signal = self.broker.on_signal
             print("[monitor] 模拟账户已挂接", flush=True)
@@ -70,7 +79,8 @@ class DbHsMonitor:
         try:
             print(
                 f"[monitor] 启动 周期={','.join(DURATION_LABELS[d] for d in HS_MONITOR_DURATIONS)} "
-                f"poll={self.poll_sec}s（只读库，不订 K 线）",
+                f"poll={self.poll_sec}s workers={self.fanout.active_workers if self.fanout else 1}"
+                "（只读库，不订 K 线）",
                 flush=True,
             )
             while True:
@@ -99,6 +109,8 @@ class DbHsMonitor:
                             self.broker.conn = conn
                 time.sleep(self.poll_sec)
         finally:
+            if self.fanout is not None:
+                self.fanout.close()
             conn.close()
             api.close()
 
@@ -109,28 +121,50 @@ class DbHsMonitor:
             traceback.print_exc()
             return list_symbols(conn, duration_sec=60) or list_symbols(conn)
 
+    def _pending_keys(self, marks: dict) -> list[tuple[str, int]]:
+        """水位前进、且不是半截会话 K 的键；顺手记水位，保证每根只算一次。"""
+        now = datetime.now(TZ).replace(tzinfo=None)
+        pending: list[tuple[str, int]] = []
+        for (symbol, dur), dt_end in marks.items():
+            last = _as_naive(dt_end)
+            prev = self._seen.get((symbol, dur))
+            if prev is not None and last <= prev:
+                continue
+            # 半截会话 K：不告警、不开仓、也不记水位，等它真正收线
+            if session_bar_open(dur, last, now):
+                continue
+            self._seen[(symbol, dur)] = last
+            pending.append((symbol, dur))
+        return pending
+
+    def _scan_stats(self, results: list[KeyResult]) -> str:
+        if self.fanout is None:
+            return "workers=1 serial"
+        return self.fanout.stats(results)
+
+    def _detect(self, conn, keys: list[tuple[str, int]]) -> list[KeyResult]:
+        """分片子进程只算形态；分片不可用就在本进程串行兜底，副作用永远在父进程。"""
+        if self.fanout is not None:
+            results = self.fanout.detect(keys)
+            if results is not None:
+                return results
+        out: list[KeyResult] = []
+        for symbol, dur in keys:
+            res = detect_one(self.engine, conn, symbol, dur)
+            if res is not None:
+                out.append(res)
+        return out
+
     def _prime(self, conn, symbols: list[str]) -> None:
         """启动时对齐水位，不发历史告警。"""
         marks = load_watermarks(conn, HS_MONITOR_DURATIONS, symbols)
-        now = datetime.now(TZ).replace(tzinfo=None)
-        for key, dt_end in marks.items():
-            symbol, dur = key
-            last = _as_naive(dt_end)
-            if session_bar_open(dur, last, now):
-                continue
-            self._seen[key] = last
-            df = load_tf_df(symbol, dur, conn=conn)
-            if df is not None and not df.empty:
-                self.engine.evaluate_df(
-                    symbol,
-                    dur,
-                    df,
-                    emit=False,
-                    push=False,
-                    toast=False,
-                )
+        keys = self._pending_keys(marks)
+        t0 = time.perf_counter()
+        results = self._detect(conn, keys)
         print(
-            f"[monitor] 水位预热 symbols≈{len(symbols)} keys={len(self._seen)}",
+            f"[monitor] 水位预热 symbols≈{len(symbols)} keys={len(self._seen)} "
+            f"loaded={len(results)} in {time.perf_counter() - t0:.1f}s "
+            f"{self._scan_stats(results)}",
             flush=True,
         )
         self._primed = True
@@ -148,48 +182,45 @@ class DbHsMonitor:
                 traceback.print_exc()
 
         marks = load_watermarks(conn, HS_MONITOR_DURATIONS, symbols)
-        now = datetime.now(TZ).replace(tzinfo=None)
+        pending = self._pending_keys(marks)
+        if not pending:
+            return 0
+        t0 = time.perf_counter()
+        results = self._detect(conn, pending)
+        scan_sec = time.perf_counter() - t0
+        # 分片回来是按片号排的，告警与开仓统一按 K 线时刻推
+        results.sort(key=lambda r: (r.last_dt, r.symbol, r.duration_sec))
         alerts = 0
-        for (symbol, dur), dt_end in marks.items():
-            last = _as_naive(dt_end)
-            prev = self._seen.get((symbol, dur))
-            if prev is not None and last <= prev:
-                continue
-            # 半截会话 K：不告警、不开仓、也不记水位，等它真正收线
-            if session_bar_open(dur, last, now):
-                continue
-            self._seen[(symbol, dur)] = last
-            df = load_tf_df(symbol, dur, conn=conn)
-            if df is None or df.empty:
-                continue
-            # 模拟盘：用最新一根 OHLC 推进止盈止损
+        for res in results:
+            # 模拟盘：用最新一根 OHLC 推进止盈止损（那根已随检测结果带回来，不再查库）
             if self.broker is not None:
-                bar_rows = load_bars(conn, symbol, dur, limit=1)
-                if bar_rows:
-                    b = bar_rows[-1]
-                    try:
-                        self.broker.on_bar(
-                            symbol,
-                            dur,
-                            _as_naive(b["datetime_end"]),
-                            b,
-                        )
-                    except Exception:
-                        traceback.print_exc()
-            n = self.engine.evaluate_df(
-                symbol,
-                dur,
-                df,
+                try:
+                    self.broker.on_bar(
+                        res.symbol,
+                        res.duration_sec,
+                        res.last_dt,
+                        res.bar,
+                    )
+                except Exception:
+                    traceback.print_exc()
+            if res.det is None:
+                continue
+            n = self.engine.deliver(
+                res.det,
                 alert_log=self.alert_log,
                 push=True,
                 toast=False,
-                emit=True,
             )
             if n:
-                label = DURATION_LABELS.get(dur, str(dur))
+                label = DURATION_LABELS.get(res.duration_sec, str(res.duration_sec))
                 print(
-                    f"[monitor] 告警 {symbol} {label} @ {last:%Y-%m-%d %H:%M}",
+                    f"[monitor] 告警 {res.symbol} {label} @ {res.last_dt:%Y-%m-%d %H:%M}",
                     flush=True,
                 )
             alerts += n
+        if scan_sec >= 1.0:
+            print(
+                f"[monitor] 本轮扫描 {self._scan_stats(results)} 用时 {scan_sec:.2f}s",
+                flush=True,
+            )
         return alerts

@@ -145,8 +145,15 @@
     **坑**：原先 `d_l/d_r` 在 strict 块里是「价格距离」、在第 750 行被重新赋值为「腿长」，靠每根 `ri` 都重算才没出事；提出循环后必须改名（`leg_l/leg_r`），否则同一 `li` 的后续 `ri` 会拿腿长当价差比。
     等价性（2026-11-16）：合成 144 用例（pivot_order 3/4/8 × strict × confirmed × 60/300s × 有无 NaN × 3 组波形）共 1284 条信号，与逐根 `last_trace` **全部一致，0 失败**；真实库 6 主连 × 1m/5m/30m 滚动回放 36 条信号同样 0 偏差（`_hs_equiv.py`、`_hs_real_diff.py`，基线 `git show 348ea03:strategies/head_shoulders.py`）。
     收益：单根 `on_bar` 中位 1m **53.3 → 2.7 ms**、5m 49.0 → 2.5、30m 48.3 → 3.6（13–20×）。
-    **顺带把瓶颈挪了位置**：策略侧只占一轮 130 键扫描的 ~8%（0.35s），其余是 `load_tf_df` 每键重取 500 根的 MySQL 往返 32 ms/键 ≈ 4.2s。#35（原计划的 3 进程分片）前提变了，等用户拍方向。
+    **顺带把瓶颈挪了位置**：策略侧只占一轮 130 键扫描的 ~8%（0.35s），其余是 `load_tf_df` 每键重取 500 根的 MySQL 往返 32 ms/键 ≈ 4.2s。#35（原计划的 3 进程分片）前提变了，已就此问过用户，用户仍选「照原计划做 3 进程分片」→ 见 #35。
     另：合成随机游走的 345 ms/根是上界，不是线上量级——真实数据极值密度低得多。
+
+35. **监控检测 3 进程按品种分片（发现延迟，不改口径）**：向量化后我曾汇报「CPU 已不是瓶颈，分片收益有限」，用户裁决**照原计划做**。事后实测证明**我那句前提是错的**：每键 32 ms 里大头是等 RDS 回包，多进程并发的正是这段等待。
+    改动：新增 `core/hs_fanout.py`；`HsMonitorEngine` 拆成 `detect()`（纯算，含 `_last_bar_dt` 水位闸，不碰 `_alerted`）+ `deliver()`（去重 + `emit_alert` + `on_signal`），`evaluate_df` 变成两者的薄壳，**串行调用方（`realtime_pipeline.py:577/732`、`check_symbol_tf`）行为不变**。`DbHsMonitor` 侧拆出 `_pending_keys`（水位闸 + 半截会话 K 闸）与 `_detect`（分片，异常退回 `detect_one` 串行），`_tick` 收齐后按 `(last_dt, symbol, duration_sec)` 排序再推模拟盘与告警——分片回包顺序是片号序，不排就会乱。
+    三条不变量：**副作用只在父进程**（`alerts.json` 的锁是进程内的、TqApi 不能跨进程，所以 worker 只回传 `Detection` + 最后一根 OHLC，模拟盘省一次查库靠这根回传的 bar）；**分片键用品种不用 (品种, 周期)**（同品种各周期落同一片，策略实例与 `_traded_patterns` 不跨进程漂）；**用 `zlib.crc32` 不用 `hash()`**（后者每进程加盐，父进程算出的片和子进程理解不上）。
+    兜底：`HS_WORKERS`（默认 3）<2 直接串行；worker 退出 / 超 `HS_WORKER_TIMEOUT=30s` 没回 / 结果序号或条数不符 → 置 `broken`，本轮起整体退回串行；worker 内连库失败累计 3 次（`MAX_STRIKE`）就中断本批、故意报条数不符让父进程兜底。`HsFanout` 构造即 spawn，故只在 `run_forever` 里 TqApi 与库都起来后才建（外层重启循环每 15s new 一个 `DbHsMonitor`，早建会每次漏 3 个子进程）。
+    等价性 + 收益（2026-11-16，`_hs_fanout_diff.py 40`，生产 RDS 只读，40 品种 × 6 周期 = 240 键，`emit_alert` 打桩）：**15 条告警逐条一致**（kind / K 线时刻 / reason / push / toast），结果对象两侧均 240；单批墙钟串行中位 **11.22s** → 分片稳态 **3.74s（3.00×）**，首轮含 worker 冷启动 8.55s；后续批次只出结果不出告警（去重回归）。`HS_WORKERS=1` 时 `detect()` 返回 None，正确退回串行。
+    未验证/待办：①**还没上生产**，生产 4 核里 ingest 常态吃掉约 1 核，3 worker 是否与它抢核要看 `docker stats`；预期分钟边界脉冲更尖、总 CPU 不变。②`spawn` 首轮冷启动（每 worker 首次 import + 连库）落在启动预热里，若重启后头一分钟有告警延迟异常先看预热行。③退回串行兜底时父进程的 `HeadShouldersStrategy` 实例是**冷的**（`_traded_patterns` 没历史），理论上可能对「worker 已就同一个头告过、但当前是新的一根」再补一条重复告警——只在分片坏掉的降级态发生，`_alerted` 挡不住（键含 last_dt）。没为此加代码，先记着。④下一档仍是「每键重取 500 根」→ 按键缓存 frame + 增量取数，没做。
 
 ---
 
