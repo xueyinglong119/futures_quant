@@ -131,6 +131,12 @@
     `python3 -c "import json;d=json.load(open('reports/backtest/5m/meta_5m.json'));[print(m['symbol'],m['when'],m['reason']) for m in d if 'LU' in m['symbol'].upper()]"`
     另记：loose / strict 是两次独立回放，**改后不是改前的严格子集**（678 里约 15 条只出现在 strict 侧），「滤掉 68」是时间戳集合差，不能按包含关系读。
 
+33. **全周期不要延迟，右肩收盘确定就立马告警**：用户原话「所有周期不要延迟，只要右肩K线收盘确定了就立马做」。
+    状态：已实现（2026-11-16）：`confirmed_shoulders` 默认 `True → False`，线上一律走「尾部单边候选 + `idx_r == last_idx` 当根触发」，1m 8 根 / 5m 6 根 / 30m 4 根 / 1h·2h 3 根 / 1d 2 根的延迟全部取消。
+    同时把候选排序（两肩价差 → 最早合格右肩 → 左右腿均衡 → 头高）从 `confirmed_shoulders` 分叉里拆出来变成无条件，**保住 #21 A4 的 earliest-R/肩形优先**，不会因为切回快口径退化成「头高优先」。
+    配套：`scripts/audit_killed_samples.py` 的预过滤改为跟着 `strat.confirmed_shoulders` 分流（原来写死两侧极值，不改会让当根口径的回测报 0 条）。`ab_hs_rules.py` 的 OLD 变体仍靠补丁还原慢口径，无需改。
+    代价（待量化）：尾部候选只要盖过前 `pivot_order` 根即成立，11-13 实测这类单边候选 57.1%（低点侧 70.1%）会在 `pivot_order` 根内被更极端同向拐点推翻——即一部分告警会抢跑后被证伪。需重跑 `run_backtest` 对比 32 条的 678@20.8%/+0.008，看快口径掉多少胜率。
+
 ---
 
 ## 待决策冲突（需用户统一裁决）

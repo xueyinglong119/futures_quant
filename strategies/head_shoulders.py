@@ -40,8 +40,9 @@ class HeadShouldersStrategy:
     一边可以有两个肩，取其中能和另一边配成形态的那一对。
     颈线连接头两侧拉开的拐点，贴着肩的那根 K 线不算。允许倾斜，倾斜不超过头部高度的 1/4。
     形态点位（肩、头、颈线拐点）一律按收盘价量，蜡烛高低点只用于风控摆动。
-    两肩都要明显离开颈线（至少 0.1×头高的余量，1m 另要求颈线锚点离肩≥3 根）。肩取两侧确认的局部极值，
-    右肩确认（pivot_order 根）后出告警/开仓。
+    两肩都要明显离开颈线（至少 0.1×头高的余量，1m 另要求颈线锚点离肩≥3 根）。
+    右肩就是当前这根 K 线（收盘确定）即出告警/开仓，全周期不延迟；confirmed_shoulders=True 才回到
+    「肩取两侧确认极值 + 右肩后 pivot_order 根触发」的慢口径。
     strict_shape 质量闸：左右肩价差≤颈线1.5%、两肩到头的 K 线间距比≤2.5×（双重/平台/三重头跳过）；
     头到颈线至少 10 个价格点（且 ≥0.8% 价格），太浅的形态不成立；
     两肩价差最小的候选优先，其次取最早的合格右肩，再次左右腿最均衡的，最后头高。
@@ -75,7 +76,7 @@ class HeadShouldersStrategy:
         flat_head_tolerance_ratio: float = 0.1,
         flat_head_min_bars: int = 4,
         max_shoulder_head_span_ratio: float = 2.5,
-        confirmed_shoulders: bool = True,
+        confirmed_shoulders: bool = False,
     ):
         self.pivot_order = pivot_order
         self.shoulder_tolerance = shoulder_tolerance
@@ -595,7 +596,7 @@ class HeadShouldersStrategy:
                     if idx_r - idx_h < self.pivot_order:
                         self._tr(idx_l, idx_h, idx_r, "order_r")
                         continue
-                    # 右肩就是当前这根才告警，避免事后补推旧形态
+                    # 只在口径要求的那根上告警（默认=右肩收盘当根），错过就不补推旧形态
                     if not self._right_shoulder_confirmed(idx_r, last_idx):
                         self._tr(idx_l, idx_h, idx_r, "trigger")
                         continue
@@ -681,14 +682,11 @@ class HeadShouldersStrategy:
                     n2, p2 = neck_r
                     neck_now = self._line_at(n1, p1, n2, p2, last_idx)
                     spread = abs(price_l - price_r)
-                    if self.confirmed_shoulders:
-                        # 肩形优先：两肩价差最小 → 最早合格右肩 → 左右腿最均衡 → 头高
-                        # （三重底/顶时同一对肩下会选出中间那个更均衡的头）
-                        d_l = idx_h - idx_l
-                        d_r = idx_r - idx_h
-                        key = (-spread, -idx_r, -abs(d_l - d_r), height)
-                    else:
-                        key = (height, -spread)
+                    # 肩形优先：两肩价差最小 → 最早合格右肩 → 左右腿最均衡 → 头高
+                    # （三重底/顶时同一对肩下会选出中间那个更均衡的头）
+                    d_l = idx_h - idx_l
+                    d_r = idx_r - idx_h
+                    key = (-spread, -idx_r, -abs(d_l - d_r), height)
                     if best is None or key > best[0]:
                         self._tr(idx_l, idx_h, idx_r, f"selected h={height:.1f} sp={spread:.1f}")
                         best = (

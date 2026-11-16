@@ -38,13 +38,22 @@ def replay_detail(
     order = strat.pivot_order
     min_len = strat.max_span_bars + order * 2 + 5
     pts = strat._pivot_series(df_all, is_high=True)
-    # 确认口径在右肩后 order 根才告警，预过滤看 i-order 是否两侧局部极值
-    extreme_idx = {i for i, _ in strat._find_pivot_highs(pts)} | {
-        i for i, _ in strat._find_pivot_lows(pts)
-    }
+    # 预过滤跟着触发口径走：确认口径看 i-order 是否两侧极值，当根口径看 i 是否盖过前 order 根
+    tail_mode = not strat.confirmed_shoulders
+    if tail_mode:
+        candidates = {
+            i
+            for i in range(order, len(pts))
+            if float(pts.iloc[i]) > float(pts.iloc[i - order : i].max())
+            or float(pts.iloc[i]) < float(pts.iloc[i - order : i].min())
+        }
+    else:
+        candidates = {i for i, _ in strat._find_pivot_highs(pts)} | {
+            i for i, _ in strat._find_pivot_lows(pts)
+        }
     out = []
     for i in range(min_len - 1, len(df_all)):
-        if (i - order) not in extreme_idx:
+        if (i if tail_mode else i - order) not in candidates:
             continue
         win = df_all.iloc[max(0, i - window) : i + 1]
         sig = strat.on_bar(win, symbol=symbol)

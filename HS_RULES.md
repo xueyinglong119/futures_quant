@@ -2,7 +2,7 @@
 
 > 逐条用户建议、每次改动的动机和每一轮重跑数据在 **[HS_REVIEW_NOTES.md](HS_REVIEW_NOTES.md)**（台账，按提出时间编号）。
 > 这份文档只留两件事：**当前生效的口径**（对着代码，不重复台账故事）和**必须在服务器上做的操作**。
-> 口径以 `git log -- strategies/head_shoulders.py` 为准，本文对齐 `68c08dc`（2026-11-15 20:53）。
+> 口径以 `git log -- strategies/head_shoulders.py` 为准，本文对齐 2026-11-16 的「全周期右肩当根即告警」口径（台账 #33）。
 
 ## 1. 当前形态口径
 
@@ -10,23 +10,23 @@
 
 | 项 | 现口径 | 出处 |
 |----|--------|------|
-| 形态点位 | 肩、头、颈线拐点**一律按收盘价量**；蜡烛 high/low 只用于止盈止损摆动 | `strategies/head_shoulders.py:198` `_pivot_series` |
-| 肩的取法 | `confirmed_shoulders=True`（默认）：只认**两侧 ±`pivot_order` 都确认**的局部极值作肩，不加单边尾部候选 | `:78` `:123` |
-| 触发时机 | **右肩确认后 `pivot_order` 根那根**告警（`last_idx == idx_r + pivot_order`）——即「当根告警」已被确认肩替换，慢 `pivot_order` 根换形态质量 | `:245` `_right_shoulder_confirmed` |
-| 多候选取舍 | 肩形优先：两肩价差最小 → 最早合格右肩 → 左右腿最均衡 → 头高 | `:684` |
+| 形态点位 | 肩、头、颈线拐点**一律按收盘价量**；蜡烛 high/low 只用于止盈止损摆动 | `strategies/head_shoulders.py:197` `_pivot_series` |
+| 肩的取法 | `confirmed_shoulders=False`（默认）：两侧确认极值 **+ 单边尾部候选**，所以右肩可以是当前这根；`=True` 时只认两侧确认极值（慢口径，回测对比用） | `:79` `:124` `:225` |
+| 触发时机 | **右肩收盘确定当根即告警/开仓**（`idx_r == last_idx`），全周期不延迟；慢口径才是 `last_idx == idx_r + pivot_order` | `:246` `_right_shoulder_confirmed` |
+| 多候选取舍 | 肩形优先：两肩价差最小 → 最早合格右肩 → 左右腿最均衡 → 头高（**不再跟着 `confirmed_shoulders` 分叉**） | `:689` |
 | 图上颈线 | 锚点同样取收盘价 | `core/hs_chart.py:120` |
 
-**`_shape_ok` 的闸，按代码顺序**（`:283`）
+**`_shape_ok` 的闸，按代码顺序**（`:284`）
 
-1. `height > 0` 且 `height ≥ min_head_neck_points = 10` 个价点（`:61`，防小波动凑形态）
+1. `height > 0` 且 `height ≥ min_head_neck_points = 10` 个价点（`:62`，防小波动凑形态）
 2. `height / price ≥ 0.008`
 3. 颈线斜率 `|p1 − p2| ≤ 0.25 × height`（锚点落在单边急涨急跌远端时颈线会贴趋势）
-4. 两肩突出：每肩离头 `≥ 0.2 × height`（`shoulder_prominence_ratio`，`:70`）
+4. 两肩突出：每肩离头 `≥ 0.2 × height`（`shoulder_prominence_ratio`，`:71`）
 5. `|左肩 − 右肩| ≤ 0.5 × height`
 6. 颈线锚点间隔：`n1 − idx_l ≥ gap`、`idx_r − n2 ≥ gap`，`gap` = **1m 用 3 根**（`shoulder_neck_bars`）、其余周期 1 根
-7. 肩离颈余量：每肩到颈线 `≥ 0.1 × height`（`min_shoulder_neck_ratio`，`:72`；原 0.3× 已取消）
+7. 肩离颈余量：每肩到颈线 `≥ 0.1 × height`（`min_shoulder_neck_ratio`，`:73`；原 0.3× 已取消）
 8. `strict_shape` 额外三条：`|左肩−右肩| ≤ 1.5% × 颈线价`；**左右腿跨度比 ≤ 2.5**（`max_shoulder_head_span_ratio`，双重/平台/三重头豁免）；颈线被收盘价穿透（容差 ±0.1×height）即拒
-9. 平台头判定容差 `flat_head_tolerance_ratio = 0.1 × height`（`:75`，`68c08dc` 刚从 0.25 收紧——0.25 太宽会把普通上涨段误判成平台头，导致对称闸形同虚设）
+9. 平台头判定容差 `flat_head_tolerance_ratio = 0.1 × height`（`:76`，`68c08dc` 刚从 0.25 收紧——0.25 太宽会把普通上涨段误判成平台头，导致对称闸形同虚设）
 
 **已移除**：130 分钟跨夜间隙闸、≤5 交易日跨度闸（台账 #15、#21）。
 
@@ -41,7 +41,7 @@
 | 2h | 3 | 6 | 110 | 200 |
 | 1d | 2 | 8 | 110 | 220 |
 
-**去重**：`pattern_id = kind:左肩时刻:头时刻:右肩时刻` + `kind-head:头时刻`，全部用 **K 线时刻**（`:609`）。窗口每根都在滑，相对下标每根都变，用下标会同一个头反复告警。
+**去重**：`pattern_id = kind:左肩时刻:头时刻:右肩时刻` + `kind-head:头时刻`，全部用 **K 线时刻**（`:611`）。窗口每根都在滑，相对下标每根都变，用下标会同一个头反复告警。
 
 **胜率口径**（`scripts/replay_winrate.py`）：信号根收盘价进场，止盈 ±0.8×swing、止损 ∓0.2×swing，`HORIZON=120` 根未决记超时，同一根 both-touch 记亏损。
 → **平衡胜率 = 0.2 / (0.8 + 0.2) = 20%**。低于 20% 就是负期望，读结果时先拿这条线卡。
@@ -49,7 +49,8 @@
 ## 2. 反复踩过的坑
 
 - **去重键用窗口相对下标 → 同一个头反复告警**（SH 30m 曾一个头出 4 条）。
-- **回放预过滤必须跟触发口径一致**：现在是「两侧确认 + 右肩后 `pivot_order` 根」，所以看 `i - order` 是否两侧极值（`scripts/audit_killed_samples.py:41`）。改成当根告警时这里必须跟着改，否则回测报 0 条。
+- **回放预过滤必须跟触发口径一致**：`scripts/audit_killed_samples.py:42` 现在按 `strat.confirmed_shoulders` 分流——当根口径看 `i` 是否盖过前 `order` 根，慢口径看 `i - order` 是否两侧极值。改触发规则时这里必须跟着改，否则回测报 0 条。
+- **当根告警的代价**：尾部候选只要盖过前 `pivot_order` 根就算右肩，而 11-13 实测「仅凭单边就成立」的候选里 57.1%（低点侧 70.1%）会在 `pivot_order` 根内被更极端的同向拐点盖掉——这部分告警属于抢跑后被证伪，只能靠胜率数据衡量。
 - **loose / strict 是两次独立回放，改后不是改前的严格子集**：`滤掉 N 条` 是时间戳集合差，`strict − (loose ∩ strict)` 那部分是只在改后侧新出现的。别把「改后 ≤ 改前」当恒等式读。
 - **平台头豁免容差不能太宽**：0.25×头高时 lu 上涨段有 ≥4 根收盘落在带内被误判成平台头，对称闸 2.5 直接形同虚设（台账 #31）。
 - **加载窗不够会静默跳过周期**：`run_backtest.py:45` 的 `LOAD_DAYS` = 1m/5m 60 天、30m 90、1h 120、2h 150、1d 300。60 天窗里 SH 的 2h 只有约 107 根，低于阈值就不出数；中金所品种只有日盘，1h 也会缺。看到某周期整列缺失先按这个算，不是 bug。
