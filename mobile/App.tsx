@@ -264,6 +264,31 @@ function moneyText(value: number | null | undefined): string {
   return `${value > 0 ? "+" : ""}${value.toFixed(2)}`;
 }
 
+function isoLocal(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/**
+ * bar_time 的口径按周期不同：1m/5m 存段首，30m/1h/2h 是会话合成、存的就是段尾，
+ * 1d 存交易日（偶有 16:00 的 UTC 写法）。卡片统一显示这根的收盘时刻。
+ */
+function barCloseText(barTime: string, durationSec?: number): string {
+  const dur = durationSec ?? 0;
+  if (!dur) return barTime;
+  if (dur >= 1800 && dur < 86400) return barTime;
+  const d = new Date(barTime);
+  if (Number.isNaN(d.getTime())) return barTime;
+  if (dur >= 86400) {
+    if (d.getHours() >= 16) d.setDate(d.getDate() + 1);
+    d.setHours(15, 0, 0, 0);
+  } else {
+    d.setSeconds(d.getSeconds() + dur);
+  }
+  return isoLocal(d);
+}
+
 function App() {
   const [tab, setTab] = useState<"alerts" | "prov" | "board" | "settings">("alerts");
   const [apiBase, setApiBase] = useState(DEFAULT_API);
@@ -560,7 +585,9 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
         {duration} · {item.kind}
       </Text>
       <Text style={styles.alertCode}>{code}</Text>
-      <Text style={styles.alertTime}>K线时间 {item.bar_time}</Text>
+      <Text style={styles.alertTime}>
+        K线收盘 {barCloseText(item.bar_time, item.extra?.duration_sec)}
+      </Text>
       <Text style={styles.alertTime}>发现时间 {item.created_at}</Text>
       <Text style={styles.alertReason}>{item.reason}</Text>
       <Text style={styles.detailHint}>{open ? "收起执行详情 ▲" : "查看执行详情 ▼"}</Text>
