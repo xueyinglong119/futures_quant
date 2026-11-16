@@ -1,83 +1,115 @@
-# 头肩告警规则与服务器运维要点
+# 头肩告警：现口径 + 服务器运维
 
-这份文档记的是**当前生效的形态口径**、踩过的坑、以及全量回测/部署必须在服务器上跑的操作。
-规则本身的演进以 git 为准（`git log -- strategies/head_shoulders.py`），这里只留结论和出处。
+> 逐条用户建议、每次改动的动机和每一轮重跑数据在 **[HS_REVIEW_NOTES.md](HS_REVIEW_NOTES.md)**（台账，按提出时间编号）。
+> 这份文档只留两件事：**当前生效的口径**（对着代码，不重复台账故事）和**必须在服务器上做的操作**。
+> 口径以 `git log -- strategies/head_shoulders.py` 为准，本文对齐 `68c08dc`（2026-11-15 20:53）。
 
-## 1. 当前形态口径（`573bd28` + `2a5ac6b`）
+## 1. 当前形态口径
+
+**点位与肩**
 
 | 项 | 现口径 | 出处 |
 |----|--------|------|
-| 形态点位 | 肩、头、颈线拐点**一律按收盘价量**；蜡烛 high/low 只用于止盈止损摆动 | `strategies/head_shoulders.py:178` `_pivot_series` |
-| 拐点判定 | 常规两侧 ±`pivot_order`；再加一根**单边尾部候选**（当前这根盖过前 `pivot_order` 根即算拐点） | `:182` `:194` `:206` `_with_tail_pivot` |
-| 触发时机 | **肩取两侧确认的局部极值；右肩确认后（再走 `pivot_order` 根）才告警**，不等破颈线（2026-11-15 用户要求 A3/A4 上线，取代「右肩当根告警」） | `:227` `_right_shoulder_confirmed` |
-| 肩离颈 | 取消 0.3×形态高度的价格幅度要求，但保留**至少 0.1×头高的余量**（2026-11-15 防止颈线贴穿肩）；锚点间隔：**1m ≥3 根**（`shoulder_neck_bars=3`），其余周期 ≥1 根；肩必须在颈线正确一侧 | `head_shoulders.py` `_shape_ok` |
-| 颈线拐点 | 离肩、离头**各至少 1 根**即可（原来贴肩的那根不算） | `:459` `gap = 1` |
-| 颈线穿透闸 | strict 下两锚点之间**收盘价不得穿透颈线超过 0.1×头高**（锚点没取到真反弹极值时线会穿 K 线，形态不成立） | `head_shoulders.py` `_shape_ok` 末段 |
-| 其余质量闸 | 高度：头到颈线 ≥**10 个价格点**（2026-11-15 用户要求）且 ≥0.008×价格、颈线斜率 ≤0.25h、头肩高差 ≥**0.2h**（2026-11-15 由 0.25h 放宽）、两肩差 ≤0.5h；strict 下两肩差 ≤1.5%·颈线（strict 0.5%·颈线斜率闸已关闭）；**跨周期时间闸已全部移除**（130 分钟间隙闸与 5 交易日跨度闸）；**头允许偏离区间极值 ≤0.25×头高**（三重底/顶，2026-11-15 用户要求 A 方案） | `core/hs_monitor.py:62` `make_strategy`、`head_shoulders.py:612` |
-| 肩头对称 | 两肩到头的 K 线间距比 ≤**2.5×**（2026-11-15：1.6 → 4.0 → 2.5 回调；双重/平台/三重头直接跳过此闸） | `head_shoulders.py` `_shape_ok` |
-| 双重底/顶特例 | 头的两个颈锚点之间若还存在一根与头价差 ≤0.25×头高的同向极值，**或**头附近（≤**0.1×头高**）有 ≥4 根收盘（平台头/底），视为宽头形态，**跳过对称闸**（2026-11-15 用户要求；平台头容差由 0.25 收紧到 0.1，避免把普通上涨段误判成平台） | `head_shoulders.py` `_best_break` / `_shape_ok` |
-| 周期参数 | 30m `pivot_order=4 / min_span=10 / max_span=110 / lookback=300`；1h `3/8/110/250`；2h `3/6/110/200`；1m `8/25/110/500`；5m `6/20/110/400`；1d `2/8/110/220` | `core/hs_monitor.py:52` `TF_CONFIGS` |
-| 去重键 | 用 **K 线时刻**（`kind:左肩时刻:头时刻:右肩时刻` + `kind-head:头时刻`），不是窗口相对下标 | `head_shoulders.py:566` |
-| 候选选择 | 确认模式：**两肩价差最小 → 最早合格右肩 → 左右腿最均衡 → 头高**（2026-11-15 调整；原「头高优先」会偏向更晚深肩的宽幅组合；三重底/顶时同一对肩下会选中间更均衡的头） | `head_shoulders.py` `_best_break` 选择键 |
-| 图上颈线 | 锚点同样取收盘价，与量化口径一致 | `core/hs_chart.py:119` `pick = "close"` |
+| 形态点位 | 肩、头、颈线拐点**一律按收盘价量**；蜡烛 high/low 只用于止盈止损摆动 | `strategies/head_shoulders.py:198` `_pivot_series` |
+| 肩的取法 | `confirmed_shoulders=True`（默认）：只认**两侧 ±`pivot_order` 都确认**的局部极值作肩，不加单边尾部候选 | `:78` `:123` |
+| 触发时机 | **右肩确认后 `pivot_order` 根那根**告警（`last_idx == idx_r + pivot_order`）——即「当根告警」已被确认肩替换，慢 `pivot_order` 根换形态质量 | `:245` `_right_shoulder_confirmed` |
+| 多候选取舍 | 肩形优先：两肩价差最小 → 最早合格右肩 → 左右腿最均衡 → 头高 | `:684` |
+| 图上颈线 | 锚点同样取收盘价 | `core/hs_chart.py:120` |
 
-胜率口径（`scripts/replay_winrate.py`）：信号根收盘价进场，止盈 ±0.8×swing、止损 ∓0.2×swing，`HORIZON=120` 根未决即超时，同一根内 both-touch 记亏损。
+**`_shape_ok` 的闸，按代码顺序**（`:283`）
 
-## 2. 已验证过的结论 / 坑
+1. `height > 0` 且 `height ≥ min_head_neck_points = 10` 个价点（`:61`，防小波动凑形态）
+2. `height / price ≥ 0.008`
+3. 颈线斜率 `|p1 − p2| ≤ 0.25 × height`（锚点落在单边急涨急跌远端时颈线会贴趋势）
+4. 两肩突出：每肩离头 `≥ 0.2 × height`（`shoulder_prominence_ratio`，`:70`）
+5. `|左肩 − 右肩| ≤ 0.5 × height`
+6. 颈线锚点间隔：`n1 − idx_l ≥ gap`、`idx_r − n2 ≥ gap`，`gap` = **1m 用 3 根**（`shoulder_neck_bars`）、其余周期 1 根
+7. 肩离颈余量：每肩到颈线 `≥ 0.1 × height`（`min_shoulder_neck_ratio`，`:72`；原 0.3× 已取消）
+8. `strict_shape` 额外三条：`|左肩−右肩| ≤ 1.5% × 颈线价`；**左右腿跨度比 ≤ 2.5**（`max_shoulder_head_span_ratio`，双重/平台/三重头豁免）；颈线被收盘价穿透（容差 ±0.1×height）即拒
+9. 平台头判定容差 `flat_head_tolerance_ratio = 0.1 × height`（`:75`，`68c08dc` 刚从 0.25 收紧——0.25 太宽会把普通上涨段误判成平台头，导致对称闸形同虚设）
 
-- **去重键用窗口相对下标会重复告警**。回放窗口每根都在滑，同一形态的相对下标每根都变，改前 SH 30m 一个头（1516，10-30 11:15）在 11-02 10:45 / 11-02 23:00 / 11-03 09:30 / 11-03 10:00 连出 4 条。改成时刻键后该品种 30m 由 10 条降到 5 条。
-- **改前/改后的告警条数不能直接对比**，去重键变了；只能同一份回放里 A/B 两个变体并排比。
-- **`replay_detail` 的预过滤必须跟着触发规则走**，否则「右肩当根即告警」这条在回测里会被旧预过滤（要求两侧拐点）整段滤掉，表现为「一条告警都没有」。现写法见 `scripts/audit_killed_samples.py:43`。
-- **当根告警的代价**：只等 4 根就确认的旧口径，是在等右肩不被更快的极值推翻。实测仅凭左肩成立的高点候选里 **57.1%**（低点侧 70.1%）会在 4 根内被更极端的同向拐点盖掉——即改后有一部分告警属于「抢跑后被证伪」，这部分只能靠胜率数据裁决。
-- **烧碱 1573 顶（30m）**：点位改收盘价后唯一卡它的就是肩离颈那道闸（11.9 vs 需 12.2，差 0.3），0.3× 能过、0.4× 过不了。当根告警口径下它的首次成立时点是 **2026-11-12 14:15**（右 1551 / 颈 1541），而不是旧口径的 11-13 09:30（右 1549 / 颈 1536）——先满足条件的那根拿到去重槽位。
-- **加载窗不够会让周期被静默跳过**：60 天加载窗 ≈37 个交易日，SH 每天约 345 个 1m 分钟 → 30m 约 426 根、1h 约 213 根、**2h 约 107 根**，低于 `ab_hs_rules.py` 的 200 根下限就不出数；中金所品种只有日盘，1h 也会缺。看到某周期整列缺失先按这个算，别当成 bug。
-- `datetime_end` 字段对 raw 周期（1m/3m/5m/10m/15m）其实是**起始**时刻，只有会话合成周期（30m/1h/2h/3h/4h）才是结束时刻。跨周期对齐时务必注意。
-- **30 天 A/B 两片合计（89 品种，2026-11-13 裁决用）**：30m 全品种 OLD 53 条胜率 23.5% / NEW 98 条 20.2%；仅监控 41 品种 OLD 37 条 25.0% / NEW 55 条 21.2%；1h 全品种 OLD 4 条 25.0% / NEW 20 条 15.8%（监控子集 NEW 13 条 8.3%）。以 ±0.8/0.2 swing 计盈亏平衡胜率是 20%：NEW 在 1h 已跌破、30m 仅贴着，期望 OLD +0.035~+0.05 vs NEW +0.002~+0.012。**结论：NEW（收盘价点位+当根告警+0.3h）暂不部署**。该轮输出按右肩下标认重合（30m 仅 1 条），可能是键的伪影；重合键已改为头的全局下标，需重跑确认「提前告警」还是「换了一批信号」。2h 该轮整列缺失（加载窗不足），需 `HS_AB_LOAD_DAYS=150` 补跑。
+**已移除**：130 分钟跨夜间隙闸、≤5 交易日跨度闸（台账 #15、#21）。
 
-## 3. 全量回测 / A/B：只在服务器上跑
+**周期参数**（`core/hs_monitor.py:52` `TF_CONFIGS`，`make_strategy` 在 `:62`）
 
-分工：**生产 4C8G `116.62.103.114`** 只跑实时链路；**老 2C2G `120.26.26.72` 的 `/opt/futures_quant` 是回测专用机**。本机（Windows）只做 `py_compile` 和单品种轻量自检，全量一律上服务器。
+| 周期 | pivot_order | min_span | max_span | lookback |
+|------|-------------|----------|----------|----------|
+| 1m | 8 | 25 | 110 | 500 |
+| 5m | 6 | 20 | 110 | 400 |
+| 30m | 4 | 10 | 110 | 300 |
+| 1h | 3 | 8 | 110 | 250 |
+| 2h | 3 | 6 | 110 | 200 |
+| 1d | 2 | 8 | 110 | 220 |
 
-老机红线：**绝不 `docker compose up`**（新 compose 是四服务，一起手就拉起 ingest/monitor → 双份订阅、双份告警、双份模拟盘、天勤配额翻倍）。老机只用 `docker build` + `docker run -d --rm`，旧 api/ingest/monitor 容器保持 Exited。
+**去重**：`pattern_id = kind:左肩时刻:头时刻:右肩时刻` + `kind-head:头时刻`，全部用 **K 线时刻**（`:609`）。窗口每根都在滑，相对下标每根都变，用下标会同一个头反复告警。
+
+**胜率口径**（`scripts/replay_winrate.py`）：信号根收盘价进场，止盈 ±0.8×swing、止损 ∓0.2×swing，`HORIZON=120` 根未决记超时，同一根 both-touch 记亏损。
+→ **平衡胜率 = 0.2 / (0.8 + 0.2) = 20%**。低于 20% 就是负期望，读结果时先拿这条线卡。
+
+## 2. 反复踩过的坑
+
+- **去重键用窗口相对下标 → 同一个头反复告警**（SH 30m 曾一个头出 4 条）。
+- **回放预过滤必须跟触发口径一致**：现在是「两侧确认 + 右肩后 `pivot_order` 根」，所以看 `i - order` 是否两侧极值（`scripts/audit_killed_samples.py:41`）。改成当根告警时这里必须跟着改，否则回测报 0 条。
+- **loose / strict 是两次独立回放，改后不是改前的严格子集**：`滤掉 N 条` 是时间戳集合差，`strict − (loose ∩ strict)` 那部分是只在改后侧新出现的。别把「改后 ≤ 改前」当恒等式读。
+- **平台头豁免容差不能太宽**：0.25×头高时 lu 上涨段有 ≥4 根收盘落在带内被误判成平台头，对称闸 2.5 直接形同虚设（台账 #31）。
+- **加载窗不够会静默跳过周期**：`run_backtest.py:45` 的 `LOAD_DAYS` = 1m/5m 60 天、30m 90、1h 120、2h 150、1d 300。60 天窗里 SH 的 2h 只有约 107 根，低于阈值就不出数；中金所品种只有日盘，1h 也会缺。看到某周期整列缺失先按这个算，不是 bug。
+- `datetime_end` 字段对 raw 周期（1m/3m/5m/10m/15m）其实是**起始**时刻，只有会话合成周期（30m/1h/2h/3h/4h）才是结束时刻。
+- **改动必须先 commit + push，再给服务器 pull 命令**：漏一次就白跑一轮回测（60 个作业全崩，台账 #29）。
+
+## 3. 回测 / A/B：只在服务器上跑
+
+分工：**生产 4C8G `116.62.103.114`**（i-bp1gio4o2xsynj0rsnoiZ）跑实时链路；**老 2C2G `120.26.26.72`** 是回测专用机。本机（Windows）只做 `py_compile` 和单品种轻量自检。休市日在生产机上跑回测可以接受（工作时段别跑，会抢实时链路的核）。
+
+老机红线：**绝不 `docker compose up`**（一起手就拉起 ingest/monitor → 双份订阅、双份告警、双份模拟盘、天勤配额翻倍）。老机只用 `docker build` + `docker run -d --rm`，旧容器保持 Exited。
 
 ```bash
 cd /opt/futures_quant
-git stash push deploy/install_docker.sh   # 该机这个文件有本地改动，否则 pull 被中止
+git stash push deploy/install_docker.sh   # 老机这个文件有本地改动，否则 pull 被中止
 git pull
 docker build -t futures-quant-api .       # 结尾空格+点不能少；不 build 则 docker run 秒退 can't open file
 ```
 
-规则 A/B（`scripts/ab_hs_rules.py`，OLD 用类方法补丁还原改前口径，NEW 走库内默认，NOGATE = NEW 但肩离颈闸整条去掉，供裁决③）：
+批量回测（`scripts/run_backtest.py`，默认 60 品种 × 60 天 × 6 周期，loose vs strict 双跑并出画廊）。生产机上最省事的是走一次性服务（`restart: "no"`，跑完自己退出，`--no-deps` 避免连带起点别的服务）：
+
+```bash
+cd /opt/futures_quant && git pull && docker compose build futures-backtest && docker compose run --rm --no-deps futures-backtest
+```
+
+老机没有 compose 在线，用手工容器——注意**重定向要写在容器内的 `sh -c` 里**，写在 `docker run -d` 后面只会建个空文件：
+
+```bash
+docker run -d --rm --name bt --env-file .env -v $PWD/reports:/app/reports -v $PWD/data:/app/data futures-quant-api sh -c "python -u scripts/run_backtest.py >> /app/reports/backtest.log 2>&1"
+```
+
+- 开关：`--days` `--workers`（默认 2，或 `BACKTEST_WORKERS`）`--tfs` `--symbols` `--outdir`；三个**只影响回测、实盘口径不变**的对比开关 `--pivot-override 300:1`、`--load-days N`、`--prominence 0.25`。`--allow-session-gap` 已随 130 分钟闸一起移除。
+- 输出目录随开关变：默认 `reports/backtest/`，带 `--pivot-override`→`backtest_pivot/`，带 `--prominence`→`backtest_prom/`，带 `--outdir` 就以它为准。
+- 产物：`summary.json`（`total` + `by_tf`）、`gallery_single.html`（命中，base64 自包含，678 张 ≈27MB）、`gallery_killed.html`（被滤）、逐周期 `reports/backtest/<label>/meta_<label>.json` 与 `killed/<label>/meta_killed.json`（元素键 = `file/symbol/when/reason`）。
+- 进度看 `grep -a '\[backtest\]' reports/backtest.log | tail`；该 log 是 `>>` 追加，顶部残留上次失败行，**以最后一条表头为准**。
+
+规则 A/B（`scripts/ab_hs_rules.py`，OLD 用类方法补丁还原旧口径）：`HS_AB_SHARD=k/n`、`HS_AB_TFS`、`HS_AB_SYMBOLS`、`HS_AB_OUT`、`HS_AB_DUMP=1`。命令一律**写成单行**，反斜杠续行粘进终端会被截断成 `-bash: ocker: command not found`。
 
 ```bash
 docker run -d --rm --name ab_hs_0 --env-file .env -e HS_AB_SHARD=0/2 -e HS_AB_TFS=30m,1h,2h -e HS_AB_OUT=/app/reports/ab_hs_0.txt -v $PWD/reports:/app/reports futures-quant-api python -u scripts/ab_hs_rules.py
-docker run -d --rm --name ab_hs_1 --env-file .env -e HS_AB_SHARD=1/2 -e HS_AB_TFS=30m,1h,2h -e HS_AB_OUT=/app/reports/ab_hs_1.txt -v $PWD/reports:/app/reports futures-quant-api python -u scripts/ab_hs_rules.py
 ```
 
-- 环境变量：`HS_AB_SHARD=k/n` 分片、`HS_AB_TFS` 周期（默认 `30m,1h`）、`HS_AB_SYMBOLS` 指定品种、`HS_AB_LOAD_DAYS` 1m 加载窗（默认 60，跑 2h 用 150）、`HS_AB_OUT` 输出、`HS_AB_DUMP=1` 逐条列告警。
-- 命令**写成单行，别用反斜杠续行**——粘进那台终端会被截断成 `-bash: ocker: command not found`。
-- 输出：逐品种行 `30m OLD=a NEW=b 同x 新y 旧z 早N根 胜/负 w/l->w/l`（同=同一个头两口径都告警，新/旧=只有一边有，早=同头改后提前几根），片尾各带「全品种」「仅监控 41 品种」合计。
-- 进度/ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完成 %d 个，平均 %.0f 秒/个，两片并行剩余约 %.0f 分钟\n", n, s/n, (89-n)/2*s/n/60}' reports/ab_hs_0.txt reports/ab_hs_1.txt`。这个外推是**线性下限，实际要 ×2**（两片抢 2 核 + 云盘）。
-- 容器 `Up ... (unhealthy)` 是镜像 healthcheck 在探 `:8000/health`，跑脚本的容器不起 HTTP，**必红，不是挂了**，别 stop。
-- 拆片前先 `docker stats --no-stream` 看内存；2C2G 上两片并行约 112MiB/片，安全。
+ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完成 %d 个，平均 %.0f 秒/个，两片并行剩余约 %.0f 分钟\n", n, s/n, (89-n)/2*s/n/60}' reports/ab_hs_0.txt reports/ab_hs_1.txt`——线性下限，**实际要 ×2**（两片抢 2 核 + 云盘）。
 
-批量回测入口是 `scripts/run_backtest.py`，其中两个开关**只影响回测、实盘口径不变**：`--pivot-override 300:1`（按周期改拐点确认根数）、`--load-days N`（覆盖各周期预热窗口，`run_backtest.py:45` 的默认表是 1m/5m=60、30m=90、1h=120、2h=150、1d=300）。
+容器 `Up ... (unhealthy)` 是镜像 healthcheck 在探 `:8000/health`，跑脚本的容器不起 HTTP，**必红不是挂了**，别 stop。
 
 ## 4. 部署与看结果
 
 - **代码是 `COPY` 进镜像的，`git pull` + `restart` 等于什么都没做。** 生产上必须：
   `docker compose up -d --build futures-api futures-ingest futures-monitor`
-  服务名显式列全、**绝不带 `futures-backtest`**（那是一次性回测任务，裸 `up` 会把它点起来打满 CPU）。
-- 验证真进容器：`docker compose exec futures-monitor grep -c <新函数名> /app/core/paper_trade.py`（`grep -c` 数的是匹配行数，只出现一次时正确期望值就是 `1`）。
+  服务名显式列全、**绝不带 `futures-backtest`**（一次性回测任务，裸 `up` 会把它点起来打满 CPU）。
+- 验证真进容器：`docker compose exec futures-monitor grep -c <新函数名> /app/core/paper_trade.py`（`grep -c` 数匹配行数，只出现一次时期望值就是 `1`）。
 - `docker compose logs futures-monitor`（和 ingest）**永远是空的，不是故障**——stdout 被重定向进 `reports/*.log`，用 `tail -n 40 reports/monitor.log`。
-- 回测画廊 `http://116.62.103.114:8000/backtest*` 只是读 `reports/<变体>/gallery_*.html`，文件不在就 404 且 detail 写明缺哪个；老机产物要先 scp 过去。更快是 scp 单个自包含 HTML 到本机用电脑浏览器打开（base64 内联，手机会卡）。scp 到位后**不用重启任何容器**。
-- 生产 sshd 只认密钥（`PasswordAuthentication no`，报 `Permission denied (publickey...)` 且不问密码不是输错）。老机→生产机已互信，反向不通。
+- 画廊路由（只有生产机有 HTTP）：`/backtest`、`/backtest/killed`、`/backtest/pivot`、`/backtest/prom`、`/backtest/neck`。路由只是读 `reports/<变体>/gallery_*.html`，缺文件就 404 且 detail 写明缺哪个；在别的机器跑出来的要先 `scp -r` 到生产机 `/opt/futures_quant/reports/`，**到位后不用重启任何容器**。
+- 生产 sshd 只认密钥（`PasswordAuthentication no`，报 `Permission denied (publickey...)` 且不问密码不是输错）。老机→生产机已互信。
 
-## 5. 未闭环事项
+## 5. 未闭环
 
-- **③ 肩离颈 0.3× 是保留还是整条去掉**：用户原话是「这个距离的限制也去掉」，当前实现保守取了 0.3×。A/B 已加第三变体 NOGATE（NEW 口径去掉肩离颈闸），等 `reports/ab_hs_0.txt` + `ab_hs_1.txt` 三列的胜率和条数再裁决。
-- **①② 的全量裁决**：30 天两片已跑（见 §2 末条），NEW 胜率不占优、1h 跌破盈亏平衡，**暂不部署**；最终裁决等 NOGATE 三变体 + `HS_AB_LOAD_DAYS=150` 补 2h + 头索引重合键的重跑。
-- **颈线穿透闸（新增，未部署）**：lu 1m 11-06 底被目视否决——头与右肩间真反弹高 5235 离头太近被拐点间距规则排除，颈线右锚落到 5182，线穿过 5235 那波 K 线。已在 `_shape_ok` 加 strict 穿透闸（容差 0.1×头高）；同轮把颈线斜率闸 0.5h→0.25h（eg 1m 10-12 顶、09-23 底同样目视否决：锚点落在急跌/急拉远端，颈线贴趋势走）。A/B 的 NEW/NOGATE 同步、OLD 保持旧口径。等 `reports/backtest_neck/` 与基线对比（条数应降、胜率应升）再决定是否上线。
-- **数据修复**：11-06～11-10 的 30m/1h/2h/3h/4h 会话周期需回填——
-  `docker compose run --rm --no-deps futures-ingest python -u scripts/rebuild_session_klines.py --all --start 2026-11-06 --end 2026-11-10`，确认输出无误后加 `--execute`；1d 的 11-06 另修。
-- **开仓时点**：一年基线和 30 天贴收盘（仅 2 条样本、竞价逆向选择）都**否定**了抢收盘跳空，strict 样本极小，规则未改。
+- 台账里的待决策：#10 左肩≈颈线是否另加闸；#12/#13 是否单跑「仅 earliest-R」；5m 单周期细化（sym/conf 两轮里 5m 都是唯一改善的周期，但合计仍为负）。
+- **合计仍贴着 20% 平衡线**（最近一轮 20.8%/+0.008），5m 与 1d 是稳定拖累——见台账 32 条。
+- 数据修复：11-06～11-10 的 30m/1h/2h/3h/4h 会话周期回填
+  `docker compose run --rm --no-deps futures-ingest python -u scripts/rebuild_session_klines.py --all --start 2026-11-06 --end 2026-11-10`，确认输出无误再加 `--execute`；1d 的 11-06 另修。
+- 开仓时点：一年基线和 30 天贴收盘（仅 2 条、竞价逆向选择）都**否定**了抢收盘跳空，规则未改。
