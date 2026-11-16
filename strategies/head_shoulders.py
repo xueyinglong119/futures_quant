@@ -5,9 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
 from strategies.base import Signal
+
+_NAN = float("nan")
 
 
 def _format_bar_time(dt_val) -> str:
@@ -22,6 +26,43 @@ def _format_bar_time(dt_val) -> str:
     if isinstance(dt_val, datetime):
         return dt_val.strftime("%m-%d %H:%M")
     return str(dt_val)
+
+
+def _range_aggs(arr: np.ndarray):
+    """稀疏表，O(1) 取区间 [a,b) 的 (最小, 最大)。NaN 按 pandas 的方式忽略，
+    空区间返回 (nan, nan)，与 `series.iloc[a:b].min()/.max()` 同值。"""
+    n = int(arr.size)
+    if n == 0:
+        return lambda a, b: (_NAN, _NAN)
+    max_tbl = [arr]
+    min_tbl = [arr]
+    length = 2
+    while length <= n:
+        half = length >> 1
+        span = n - length + 1
+        prev_max = max_tbl[-1]
+        prev_min = min_tbl[-1]
+        max_tbl.append(np.fmax(prev_max[:span], prev_max[half : half + span]))
+        min_tbl.append(np.fmin(prev_min[:span], prev_min[half : half + span]))
+        length <<= 1
+    log2 = [0] * (n + 1)
+    for i in range(2, n + 1):
+        log2[i] = log2[i >> 1] + 1
+
+    def query(a: int, b: int) -> tuple[float, float]:
+        if b > n:
+            b = n
+        span = b - a
+        if span <= 0:
+            return (_NAN, _NAN)
+        j = log2[span]
+        off = b - (1 << j)
+        return (
+            float(np.fmin(min_tbl[j][a], min_tbl[j][off])),
+            float(np.fmax(max_tbl[j][a], max_tbl[j][off])),
+        )
+
+    return query
 
 
 @dataclass
@@ -200,26 +241,34 @@ class HeadShouldersStrategy:
 
     def _find_pivot_highs(self, series: pd.Series) -> list[tuple[int, float]]:
         order = self.pivot_order
+        n = len(series)
+        if n <= 2 * order:
+            return []
+        arr = np.asarray(series, dtype="float64")
+        wmax = np.fmax.reduce(sliding_window_view(arr, order), axis=1)
         pivots: list[tuple[int, float]] = []
-        for i in range(order, len(series) - order):
-            val = float(series.iloc[i])
-            left = series.iloc[i - order : i]
-            right = series.iloc[i + 1 : i + order + 1]
-            if val >= left.max() and val >= right.max():
-                if val > left.max() or val > right.max():
-                    pivots.append((i, val))
+        for i in range(order, n - order):
+            val = float(arr[i])
+            lm = float(wmax[i - order])
+            rm = float(wmax[i + 1])
+            if val >= lm and val >= rm and (val > lm or val > rm):
+                pivots.append((i, val))
         return pivots
 
     def _find_pivot_lows(self, series: pd.Series) -> list[tuple[int, float]]:
         order = self.pivot_order
+        n = len(series)
+        if n <= 2 * order:
+            return []
+        arr = np.asarray(series, dtype="float64")
+        wmin = np.fmin.reduce(sliding_window_view(arr, order), axis=1)
         pivots: list[tuple[int, float]] = []
-        for i in range(order, len(series) - order):
-            val = float(series.iloc[i])
-            left = series.iloc[i - order : i]
-            right = series.iloc[i + 1 : i + order + 1]
-            if val <= left.min() and val <= right.min():
-                if val < left.min() or val < right.min():
-                    pivots.append((i, val))
+        for i in range(order, n - order):
+            val = float(arr[i])
+            lm = float(wmin[i - order])
+            rm = float(wmin[i + 1])
+            if val <= lm and val <= rm and (val < lm or val < rm):
+                pivots.append((i, val))
         return pivots
 
     def _with_tail_pivot(
@@ -230,12 +279,15 @@ class HeadShouldersStrategy:
         i = len(series) - 1
         if i < order:
             return pivots
-        val = float(series.iloc[i])
-        left = series.iloc[i - order : i]
-        if is_high and val > float(left.max()):
-            pivots.append((i, val))
-        elif not is_high and val < float(left.min()):
-            pivots.append((i, val))
+        arr = np.asarray(series, dtype="float64")
+        val = float(arr[i])
+        seg = arr[i - order : i]
+        if is_high:
+            if val > float(np.fmax.reduce(seg)):
+                pivots.append((i, val))
+        else:
+            if val < float(np.fmin.reduce(seg)):
+                pivots.append((i, val))
         return pivots
 
     def _shoulders_balanced(self, left: float, right: float, reference: float) -> bool:
@@ -342,11 +394,15 @@ class HeadShouldersStrategy:
             if closes is not None:
                 # 颈线被收盘价穿透说明锚点没取到真正的反弹极值，形态不成立
                 tol = 0.1 * height
-                for i in range(n1, n2 + 1):
-                    line = self._line_at(n1, p1, n2, p2, i)
-                    c = float(closes.iloc[i])
-                    if (bottom and c > line + tol) or (not bottom and c < line - tol):
-                        return None
+                span = np.arange(n1, n2 + 1)
+                if n2 == n1:
+                    lines = np.full(span.size, (p1 + p2) / 2)
+                else:
+                    lines = p1 + (p2 - p1) * ((span - n1) / (n2 - n1))
+                c = np.asarray(closes, dtype="float64")[n1 : n2 + 1]
+                bad = c > lines + tol if bottom else c < lines - tol
+                if bool(bad.any()):
+                    return None
         return height, neck_head
 
     def _register_short(self, symbol: str, price_h: float, neck: float) -> None:
@@ -527,12 +583,24 @@ class HeadShouldersStrategy:
             return None
         pts = self._pivot_series(klines, is_high=not bottom)
         last_idx = len(klines) - 1
-        extreme = pts
+        pts_arr = np.asarray(pts, dtype="float64")
+        agg = _range_aggs(pts_arr)
+        dt_col = klines["datetime"].tolist()
+        bt_cache: dict[int, str] = {}
+
+        def bar_time(i: int) -> str:
+            v = bt_cache.get(i)
+            if v is None:
+                v = _format_bar_time(dt_col[i])
+                bt_cache[i] = v
+            return v
+
         best: tuple[float, tuple] | None = None
         if self.trace:
             self.last_trace = []
 
         for hi, (idx_h, price_h) in enumerate(pivots):
+            head_time = bar_time(idx_h)
             for li in range(hi):
                 idx_l, price_l = pivots[li]
                 if idx_h - idx_l < self.pivot_order:
@@ -547,40 +615,44 @@ class HeadShouldersStrategy:
                 if not bottom and price_l >= price_h:
                     self._tr(idx_l, idx_h, -1, "side_l")
                     continue
+                # 只依赖 (li, hi) 的量在外层算一次，ri 循环里只查表
+                neck_l = self._reaction_neck(
+                    reaction_pivots, idx_l, idx_h, lowest=not bottom
+                )
+                between_l: list[tuple[int, float]] = []
+                if self.strict_shape:
+                    between_l = [
+                        p for p in pivots[li + 1 : hi] if idx_h - p[0] > self.pivot_order
+                    ]
+                    d_l = (price_l - price_h) if bottom else (price_h - price_l)
+                between_r: list[tuple[int, float]] = []
                 for ri in range(hi + 1, len(pivots)):
                     idx_r, price_r = pivots[ri]
                     if self.strict_shape:
-                        between_l = [
-                            p for p in pivots[li + 1 : hi] if idx_h - p[0] > self.pivot_order
-                        ]
-                        between_r = [
-                            p for p in pivots[hi + 1 : ri] if p[0] - idx_h > self.pivot_order
-                        ]
-                        d_l = (price_l - price_h) if bottom else (price_h - price_l)
+                        if ri > hi + 1:
+                            prev = pivots[ri - 1]
+                            if prev[0] - idx_h > self.pivot_order:
+                                between_r.append(prev)
                         d_r = (price_r - price_h) if bottom else (price_h - price_r)
-                        dref = min(d_l, d_r)
+                        ref = self.dominance_reaction_ratio * min(d_l, d_r)
                         if bottom:
                             dominated = any(
                                 p < price_l
-                                and float(pts.iloc[idx_l : ip].max()) - price_l
-                                >= self.dominance_reaction_ratio * dref
+                                and agg(idx_l, ip)[1] - price_l >= ref
                                 for ip, p in between_l
                             ) or any(
                                 p < price_r
-                                and float(pts.iloc[ip : idx_r].max()) - price_r
-                                >= self.dominance_reaction_ratio * dref
+                                and agg(ip, idx_r)[1] - price_r >= ref
                                 for ip, p in between_r
                             )
                         else:
                             dominated = any(
                                 p > price_l
-                                and price_l - float(pts.iloc[idx_l : ip].min())
-                                >= self.dominance_reaction_ratio * dref
+                                and price_l - agg(idx_l, ip)[0] >= ref
                                 for ip, p in between_l
                             ) or any(
                                 p > price_r
-                                and price_r - float(pts.iloc[ip : idx_r].min())
-                                >= self.dominance_reaction_ratio * dref
+                                and price_r - agg(ip, idx_r)[0] >= ref
                                 for ip, p in between_r
                             )
                         if dominated:
@@ -607,18 +679,13 @@ class HeadShouldersStrategy:
                         self._tr(idx_l, idx_h, idx_r, "side_r")
                         continue
                     # 窗口在滑，相对下标每根都会变，去重必须用 K 线时刻
-                    head_time = _format_bar_time(klines.iloc[idx_h]["datetime"])
                     pattern_id = (
-                        f"{kind}:{_format_bar_time(klines.iloc[idx_l]['datetime'])}"
-                        f":{head_time}:{_format_bar_time(klines.iloc[idx_r]['datetime'])}"
+                        f"{kind}:{bar_time(idx_l)}:{head_time}:{bar_time(idx_r)}"
                     )
                     if pattern_id in traded or f"{kind}-head:{head_time}" in traded:
                         self._tr(idx_l, idx_h, idx_r, "traded")
                         continue
-                    window = extreme.iloc[idx_l : idx_r + 1]
-                    neck_l = self._reaction_neck(
-                        reaction_pivots, idx_l, idx_h, lowest=not bottom
-                    )
+                    win_lo, win_hi = agg(idx_l, idx_r + 1)
                     neck_r = self._reaction_neck(
                         reaction_pivots, idx_h, idx_r, lowest=not bottom
                     )
@@ -642,11 +709,12 @@ class HeadShouldersStrategy:
                             for i, p in pivots
                             if span_lo < i < span_hi and abs(p - price_h) <= tol_d
                         ]
-                        near_bars = sum(
-                            1
-                            for i in range(span_lo + 1, span_hi)
-                            if abs(float(extreme.iloc[i]) - price_h)
-                            <= self.flat_head_tolerance_ratio * height_pre
+                        flat_tol = self.flat_head_tolerance_ratio * height_pre
+                        near_bars = int(
+                            (
+                                np.abs(pts_arr[span_lo + 1 : span_hi] - price_h)
+                                <= flat_tol
+                            ).sum()
                         )
                         double_head = (
                             len(similar) >= 2
@@ -672,10 +740,10 @@ class HeadShouldersStrategy:
                     # 三重底/顶：头可偏离区间极值至多 0.25×头高（近似等高的三个极值也算成立）
                     tol_h = self.triple_head_tolerance_ratio * height
                     if bottom:
-                        if price_h - float(window.min()) > tol_h:
+                        if price_h - win_lo > tol_h:
                             self._tr(idx_l, idx_h, idx_r, "window_extreme")
                             continue
-                    elif float(window.max()) - price_h > tol_h:
+                    elif win_hi - price_h > tol_h:
                         self._tr(idx_l, idx_h, idx_r, "window_extreme")
                         continue
                     n1, p1 = neck_l
@@ -684,9 +752,10 @@ class HeadShouldersStrategy:
                     spread = abs(price_l - price_r)
                     # 肩形优先：两肩价差最小 → 最早合格右肩 → 左右腿最均衡 → 头高
                     # （三重底/顶时同一对肩下会选出中间那个更均衡的头）
-                    d_l = idx_h - idx_l
-                    d_r = idx_r - idx_h
-                    key = (-spread, -idx_r, -abs(d_l - d_r), height)
+                    # 腿长用别名，别覆盖 strict 块里按价格算的 d_l / d_r
+                    leg_l = idx_h - idx_l
+                    leg_r = idx_r - idx_h
+                    key = (-spread, -idx_r, -abs(leg_l - leg_r), height)
                     if best is None or key > best[0]:
                         self._tr(idx_l, idx_h, idx_r, f"selected h={height:.1f} sp={spread:.1f}")
                         best = (

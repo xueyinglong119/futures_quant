@@ -57,7 +57,10 @@
 - `datetime_end` 字段对 raw 周期（1m/3m/5m/10m/15m）其实是**起始**时刻，只有会话合成周期（30m/1h/2h/3h/4h）才是结束时刻。
   证据：`serial_to_rows` 用 K 线的 `datetime`（=起点）算 `start_utc`（`core/realtime_pipeline.py:238`），再把它塞进 `upsert_bars` 的 `datetime_end`（`:592`）。
   **读告警延迟时必须先减掉这根的长度**：App 里 1m 显示 `K线时间 10:01:00 / 发现时间 10:02:14`，看着像差 1 分 14 秒，实际是这根在 10:02:00 才收线，真实延迟 **14 秒**。
-  剩下的十几秒来自 monitor 的**串行扫描**（`poll_sec=0.5` 一圈，按水位把本轮有新根的品种逐个 `load_tf_df` + `on_bar`，排在后面的更晚出）：合成随机游走实测单根 `on_bar` 1m（lookback 500、pivot_order 8、strict 开）**中位 345 ms**、关 strict 93 ms → 130 品种串行 45s / 12s 上界；线上观测 14–24s 说明真实数据极值密度更低、比合成便宜，但量级就是它，**与「右肩当根告警」无关**（reason 里右肩时刻 = K 线时刻即口径成立）。
+  剩下的十几秒来自 monitor 的**串行扫描**（`poll_sec=0.5` 一圈，按水位把本轮有新根的品种逐个 `load_tf_df` + `on_bar`，排在后面的更晚出）。
+  实测（2026-11-16，生产 RDS 只读，6 个主连逐根滚动回放，`_hs_real_diff.py`）：向量化前 1m（lookback 500、pivot_order 8、strict 开）**中位 53 ms/根**，5m 49 ms、30m 48 ms → 130 品种 1m 一轮策略侧 ≈ 7s；向量化后 2.7 / 2.5 / 3.6 ms（**约 20×**，见 3 节）。
+  取数侧另有硬成本：`load_tf_df` 单键 **32 ms**（`load_bars` 取 500 根的 MySQL 往返，`bars_to_strategy_df` 只占 1.6 ms）→ 130 键串行 ≈ **4.2s 纯 I/O**，现在它才是扫描的大头。
+  合成随机游走的 345 ms/根是**上界不是量级**（极值密度比真实数据高）。**与「右肩当根告警」无关**（reason 里右肩时刻 = K 线时刻即口径成立）。
 - **改动必须先 commit + push，再给服务器 pull 命令**：漏一次就白跑一轮回测（60 个作业全崩，台账 #29）。
 
 ## 3. 回测 / A/B：只在服务器上跑
@@ -100,7 +103,9 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 
 容器 `Up ... (unhealthy)` 是镜像 healthcheck 在探 `:8000/health`，跑脚本的容器不起 HTTP，**必红不是挂了**，别 stop。
 
-实时链路 CPU 归因（2026-11-16 本机微基准：随机游走 + 400 根滑窗 + 5m 参数）：单根 `on_bar` 慢口径 **103.9 ms** vs 当根口径 **105.9 ms**——**切触发口径不省 CPU**（差 <2%，尾部候选只多一个 pivot）；关掉 `strict_shape` 才降到 62–66 ms（−40%），大头在 strict 的肩部主导性三重循环 + pandas 切片。总耗时 ≈ 品种数 × 单根耗时，1m 每分钟全品种各算一次，60 品种 ≈ 6–9 秒/分钟 ≈ 4 核 3–4%。控制台掉到个位数百分比时先分清三种原因：负载本来就轻（午休 11:30–13:30、小节休息 10:15–10:30、收盘后没有新 1m 根）、回测容器已挪去老机、**还是数据不推进**（水位不动 → `_tick` 整根跳过，这种情况告警也一起没了，是坏消息）。查水位：`docker compose exec -T futures-monitor python -` 里跑 `load_watermarks(conn, HS_MONITOR_DURATIONS, list_symbols(conn, duration_sec=60))`，看 1m 的 `max` 有没有贴着 now。
+实时链路 CPU 归因（2026-11-16 本机微基准：随机游走 + 400 根滑窗 + 5m 参数）：单根 `on_bar` 慢口径 **103.9 ms** vs 当根口径 **105.9 ms**——**切触发口径不省 CPU**（差 <2%，尾部候选只多一个 pivot）；关掉 `strict_shape` 才降到 62–66 ms（−40%），大头在 strict 的肩部主导性三重循环 + pandas 切片。
+**这条已在 11-16 向量化拆掉**：`_range_aggs` 稀疏表接管区间 min/max（`pts.iloc[a:b].max()` 每次 20–30µs 的 pandas 切片 → O(1) numpy 查表），拐点扫描 / 颈线穿透 / 平台头计数改 numpy，`(li,hi)` 级只算一次的量（`neck_l`、`between_l`、`head_time`）从 `ri` 循环里提出去。真实库回放 1m **53.3 → 2.7 ms/根**、5m 49.0 → 2.5、30m 48.3 → 3.6；等价性用 144 个合成用例（pivot_order 3/4/8 × strict × confirmed × 60/300s × 含 NaN）+ 6 品种 × 3 周期真实回放（36 条信号、逐根 `last_trace`）**全部零偏差**。校验脚本 `_hs_equiv.py` / `_hs_real_diff.py`（基线副本 `git show 348ea03:strategies/head_shoulders.py > _hs_baseline.py` 现取）。
+改造后 monitor 一轮 130 键的成本结构变了：策略侧 0.35s、取数侧 4.2s（32 ms/键的 MySQL 往返），**所以再压缩延迟要从「每键重取 500 根」下手，不是加进程分 CPU**。总耗时 ≈ 品种数 × 单根耗时，1m 每分钟全品种各算一次，60 品种 ≈ 6–9 秒/分钟 ≈ 4 核 3–4%。控制台掉到个位数百分比时先分清三种原因：负载本来就轻（午休 11:30–13:30、小节休息 10:15–10:30、收盘后没有新 1m 根）、回测容器已挪去老机、**还是数据不推进**（水位不动 → `_tick` 整根跳过，这种情况告警也一起没了，是坏消息）。查水位：`docker compose exec -T futures-monitor python -` 里跑 `load_watermarks(conn, HS_MONITOR_DURATIONS, list_symbols(conn, duration_sec=60))`，看 1m 的 `max` 有没有贴着 now。
 
 ## 4. 部署与看结果
 
@@ -123,3 +128,4 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 - **5m 与 1d 只有 89 个品种有数据，1m 有 130**（同一张水位表）。差额应是「历史回填写过的品种」多于「实时订阅的品种」——用 `grep "品种" reports/ingest.log | tail -3` 核 `list_commodity_mains` 返回的数量；若确实只有 89，那这 41 个品种的 5m/1d **永远不出告警**，要覆盖得补历史或加订阅。
 - ingest 常态就是 ≈ 单核打满（`docker stats` 5 次采样 90.8/95.9/100.0/99.7/100.0%，4 核约 25%；monitor 则是分钟边界脉冲，同一批采样 27.0/0.7/23.0/1.0/21.3%，api 0.06%）。主因已定位：`serial_to_rows` 用 `klines.iloc[i]["col"]` 逐行取标量，**60 行的 1m 序列一次实测 25.8 ms**；按单核打满反推 ≈ 每秒 35–39 次调用（每 0.25s 圈约 9 条序列被 `is_changing` 判为变化），数字自洽。降载两档：向量化取列（输出逐行一致，实测 5.5 ms，→ 约 20% 单核）、或只解析水位之后的行（调用方本就按 watermark 过滤，可 <1 ms，→ 个位数百分比，但要连带核 `correction`/半截K 判定）。**不改告警语义**，且 ingest 是 `enable_monitor=False` 不跑策略——所以告警口径怎么改都不影响它，别把 CPU 变化算成规则改动的功劳。
 - 开仓时点：一年基线和 30 天贴收盘（仅 2 条、竞价逆向选择）都**否定**了抢收盘跳空，规则未改。
+- **并行发现的原计划（3 进程分片 worker 只算、父进程发告警）前提已被向量化推翻**：11-16 改造后策略侧只占一轮扫描的 ~8%（0.35s vs 取数 4.2s），分 CPU 收益有限。要再压延迟就得动「每键重取 500 根」——按键缓存 frame + 只取增量，或并发取数。等用户拍方向。
