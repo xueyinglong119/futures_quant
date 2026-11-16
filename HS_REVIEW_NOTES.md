@@ -136,6 +136,9 @@
     同时把候选排序（两肩价差 → 最早合格右肩 → 左右腿均衡 → 头高）从 `confirmed_shoulders` 分叉里拆出来变成无条件，**保住 #21 A4 的 earliest-R/肩形优先**，不会因为切回快口径退化成「头高优先」。
     配套：`scripts/audit_killed_samples.py` 的预过滤改为跟着 `strat.confirmed_shoulders` 分流（原来写死两侧极值，不改会让当根口径的回测报 0 条）。`ab_hs_rules.py` 的 OLD 变体仍靠补丁还原慢口径，无需改。
     代价（待量化）：尾部候选只要盖过前 `pivot_order` 根即成立，11-13 实测这类单边候选 57.1%（低点侧 70.1%）会在 `pivot_order` 根内被更极端同向拐点推翻——即一部分告警会抢跑后被证伪。需重跑 `run_backtest` 对比 32 条的 678@20.8%/+0.008，看快口径掉多少胜率。
+    取证（2026-11-16，合成 5m 序列跑 `on_bar`，pivot_order=6）：`confirmed_shoulders=False` 时 `right_idx == len(df)-1`（`delta=0`，右肩时刻与告警 K 线时刻同一根）；`=True` 时 `delta=6`（晚 30 分钟）。链条是闭合的：`_pivot_series` 直接返回 `klines.close`（同长度、同下标），尾部候选下标 = `len(series)-1`，`_right_shoulder_confirmed` 判 `idx_r == last_idx`，reason 与 `emit_alert(when=...)` 取的是同一个 df 的同一列（`bars_to_strategy_df` 统一按 `datetime_end` 排序后 `reset_index`）。
+    所以「K线 11-16 09:10 但右肩 11-14 02:10」这种跨两天的组合**两种口径都产不出来**（慢口径最多晚 `pivot_order` 根），是终端折行把相邻两条告警看串了；线上要用 `reports/all_mains_hs_alerts.txt`（每行 = `时刻 | 名称 | 合约 | 周期 | 类型 | K线ISO时刻 | 完整 reason`，不折行）核对 `右(...)` 与 K 线字段是否一致。
+    另一处已证实的行为：右肩还在爬升时，第一个盖过前 6 根的收盘就会告警（合成数据在第 128 根即出信号，不是肩顶那根），随后 `kind-head:头时刻` 去重会挡住同一头的再告警——这是「不延迟」的直接代价，与上面 57.1% 被推翻的统计同源。
 
 ---
 
@@ -160,7 +163,7 @@
 
 - 上面「已上线口径 = NEW（收盘价点位 + 当根告警 + 0.3h 肩离颈）+ 5 交易日跨度闸 + 肩突出 0.25h」那句是 **11-15 中午的旧状态**，已被 #17/#20/#21/#30/#31/`68c08dc` 逐条覆盖。当前实际生效（`strategies/head_shoulders.py`）：
   - 收盘价点位（`_pivot_series`）；
-  - **确认肩**：`confirmed_shoulders=True` → 只用两侧确认的极值作肩，触发在右肩后 `pivot_order` 根，**「当根告警」已下线**；
+  - **当根告警**：`confirmed_shoulders=False`（`3ed1df0` 起，覆盖 #21 的确认肩）→ 两侧确认极值 **+ 尾部单边候选**，右肩收盘那根立即触发；`True` 才回到「肩取两侧确认极值 + 右肩后 `pivot_order` 根」的慢口径；
   - earliest-R 肩形优先排序（两肩价差 → 最早合格右肩 → 左右腿均衡 → 头高）；
   - 头高 ≥10 个价点、肩突出 ≥0.2h、**肩离颈余量 ≥0.1h**（0.3h 取消）、颈锚点间隔 1m 3 根 / 其余 1 根、斜率 ≤0.25h；
   - strict：对称 2.5（双重/平台/三重头豁免，平台头容差 0.1h）+ 颈线收盘穿透闸；
