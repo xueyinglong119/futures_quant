@@ -459,15 +459,11 @@ function App() {
         />
       ) : (
         <>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={[styles.dayRow, { paddingHorizontal: 16 }]}
-          >
+          <View style={styles.tfRow}>
             {TF_CHIPS.map((label) => (
               <Pressable
                 key={label || "all"}
-                style={[styles.dayChip, tf === label ? styles.dayChipOn : null]}
+                style={[styles.tab, tf === label ? styles.tabOn : null]}
                 onPress={() => {
                   tfRef.current = label;
                   setTf(label);
@@ -475,10 +471,10 @@ function App() {
                   fetchAlerts();
                 }}
               >
-                <Text style={styles.dayText}>{label || "全部"}</Text>
+                <Text style={styles.tabText}>{label || "全部"}</Text>
               </Pressable>
             ))}
-          </ScrollView>
+          </View>
           {loading ? (
             <ActivityIndicator color="#E8B86D" style={{ marginTop: 24 }} />
           ) : (
@@ -724,7 +720,8 @@ const styles = StyleSheet.create({
   },
   sub: { color: "#9BB0C1", marginTop: 4, fontSize: 14 },
   tabs: { flexDirection: "row", gap: 8, marginTop: 12 },
-  tab: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: "#143049" },
+  tfRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: 8, paddingHorizontal: 16, paddingBottom: 12, paddingTop: 4 },
+  tab: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: "#143049", alignSelf: "flex-start" },
   tabOn: { backgroundColor: "#C45C26" },
   tabText: { color: "#F4F0E8", fontWeight: "700" },
   dayRow: { gap: 8, paddingBottom: 12 },
