@@ -97,6 +97,8 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 
 容器 `Up ... (unhealthy)` 是镜像 healthcheck 在探 `:8000/health`，跑脚本的容器不起 HTTP，**必红不是挂了**，别 stop。
 
+实时链路 CPU 归因（2026-11-16 本机微基准：随机游走 + 400 根滑窗 + 5m 参数）：单根 `on_bar` 慢口径 **103.9 ms** vs 当根口径 **105.9 ms**——**切触发口径不省 CPU**（差 <2%，尾部候选只多一个 pivot）；关掉 `strict_shape` 才降到 62–66 ms（−40%），大头在 strict 的肩部主导性三重循环 + pandas 切片。总耗时 ≈ 品种数 × 单根耗时，1m 每分钟全品种各算一次，60 品种 ≈ 6–9 秒/分钟 ≈ 4 核 3–4%。控制台掉到个位数百分比时先分清三种原因：负载本来就轻（午休 11:30–13:30、小节休息 10:15–10:30、收盘后没有新 1m 根）、回测容器已挪去老机、**还是数据不推进**（水位不动 → `_tick` 整根跳过，这种情况告警也一起没了，是坏消息）。查水位：`docker compose exec -T futures-monitor python -` 里跑 `load_watermarks(conn, HS_MONITOR_DURATIONS, list_symbols(conn, duration_sec=60))`，看 1m 的 `max` 有没有贴着 now。
+
 ## 4. 部署与看结果
 
 - **代码是 `COPY` 进镜像的，`git pull` + `restart` 等于什么都没做。** 生产上必须：
