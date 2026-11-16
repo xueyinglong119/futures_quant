@@ -115,4 +115,8 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 - **合计仍贴着 20% 平衡线**（最近一轮 20.8%/+0.008），5m 与 1d 是稳定拖累——见台账 32 条。
 - 数据修复：11-06～11-10 的 30m/1h/2h/3h/4h 会话周期回填
   `docker compose run --rm --no-deps futures-ingest python -u scripts/rebuild_session_klines.py --all --start 2026-11-06 --end 2026-11-10`，确认输出无误再加 `--execute`；1d 的 11-06 另修。
+- **1d 又缺 11-14/11-15**（11-16 09:56 水位表 `dur=86400 max=2026-11-13 00:00`）。`rebuild_session_klines.py` 只合成 30m/1h/2h/3h/4h，不管 1d/5m；1d 用
+  `docker compose run --rm --no-deps futures-ingest python -u scripts/repair_today_klines.py --day 2026-11-14 --durations 1d`（再 `--day 2026-11-15`）。该脚本**直接写库、无 dry-run**，且会再开一个 TqApi 会话占配额。
+- **5m 与 1d 只有 89 个品种有数据，1m 有 130**（同一张水位表）。差额应是「历史回填写过的品种」多于「实时订阅的品种」——用 `grep "品种" reports/ingest.log | tail -3` 核 `list_commodity_mains` 返回的数量；若确实只有 89，那这 41 个品种的 5m/1d **永远不出告警**，要覆盖得补历史或加订阅。
+- ingest 常态就是 ≈ 单核打满（`docker stats` 98.81%，4 核约 25%）：主循环每 0.25s 一圈扫 ~910 条（130×7）已就绪序列，1m 每个 tick 都算「变化」→ 每圈都跑 `serial_to_rows` + 水位比较 + 会话合成（[core/realtime_pipeline.py:370](core/realtime_pipeline.py)、`:475`、`:514`）。它是 `enable_monitor=False`，**不跑头肩策略**，所以告警口径怎么改都不影响它——别把 CPU 变化算成规则改动的功劳。
 - 开仓时点：一年基线和 30 天贴收盘（仅 2 条、竞价逆向选择）都**否定**了抢收盘跳空，规则未改。
