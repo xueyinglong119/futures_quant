@@ -265,7 +265,7 @@ function moneyText(value: number | null | undefined): string {
 }
 
 function App() {
-  const [tab, setTab] = useState<"alerts" | "prov" | "board">("alerts");
+  const [tab, setTab] = useState<"alerts" | "prov" | "board" | "settings">("alerts");
   const [apiBase, setApiBase] = useState(DEFAULT_API);
   const [apiInput, setApiInput] = useState(DEFAULT_API);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
@@ -291,6 +291,8 @@ function App() {
     if (saved) {
       setApiBase(saved);
       setApiInput(saved);
+    } else {
+      setTab("settings");
     }
   }, []);
 
@@ -373,6 +375,15 @@ function App() {
     fetchAlerts();
   };
 
+  const refreshCurrent = () => {
+    if (tab === "board") {
+      fetchBoard(boardDay || undefined);
+    } else {
+      setLoading(true);
+      fetchAlerts();
+    }
+  };
+
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
@@ -418,37 +429,42 @@ function App() {
           >
             <Text style={styles.tabText}>看板</Text>
           </Pressable>
-        </View>
-      </View>
-
-      <View style={styles.card}>
-        <Text style={styles.label}>服务器地址（电脑局域网 IP）</Text>
-        <TextInput
-          style={styles.input}
-          value={apiInput}
-          onChangeText={setApiInput}
-          autoCapitalize="none"
-          autoCorrect={false}
-          placeholder="http://192.168.x.x:8000"
-          placeholderTextColor="#7A8B9A"
-        />
-        <View style={styles.row}>
-          <Pressable style={styles.btn} onPress={saveApi}>
-            <Text style={styles.btnText}>保存并连接</Text>
-          </Pressable>
           <Pressable
-            style={[styles.btn, styles.btnGhost]}
-            onPress={() => (tab === "board" ? fetchBoard(boardDay || undefined) : fetchAlerts())}
+            style={[styles.tab, tab === "settings" ? styles.tabOn : null]}
+            onPress={() => setTab("settings")}
           >
-            <Text style={styles.btnText}>刷新</Text>
+            <Text style={styles.tabText}>设置</Text>
           </Pressable>
+          {tab === "settings" ? null : (
+            <Pressable style={[styles.tab, styles.chipGhost]} onPress={refreshCurrent}>
+              <Text style={styles.tabText}>刷新</Text>
+            </Pressable>
+          )}
         </View>
-        <Text style={styles.meta}>打开后每 15 秒刷新列表。K线时间≠发现时间。</Text>
-        {pushStatus ? <Text style={styles.meta}>{pushStatus}</Text> : null}
-        {error ? <Text style={styles.error}>连接失败：{error}</Text> : null}
       </View>
 
-      {tab === "board" ? (
+      {tab === "settings" ? (
+        <View style={styles.card}>
+          <Text style={styles.label}>服务器地址（电脑局域网 IP）</Text>
+          <TextInput
+            style={styles.input}
+            value={apiInput}
+            onChangeText={setApiInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="http://192.168.x.x:8000"
+            placeholderTextColor="#7A8B9A"
+          />
+          <View style={styles.row}>
+            <Pressable style={styles.btn} onPress={saveApi}>
+              <Text style={styles.btnText}>保存并连接</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.meta}>打开后每 15 秒刷新列表。K线时间≠发现时间。</Text>
+          {pushStatus ? <Text style={styles.meta}>{pushStatus}</Text> : null}
+          {error ? <Text style={styles.error}>连接失败：{error}</Text> : null}
+        </View>
+      ) : tab === "board" ? (
         <BoardPane
           board={board}
           loading={boardLoading}
@@ -459,6 +475,9 @@ function App() {
         />
       ) : (
         <>
+          {error ? (
+            <Text style={styles.connWarn}>连不上服务器，请到「设置」检查服务器地址</Text>
+          ) : null}
           <View style={styles.tfRow}>
             {TF_CHIPS.map((label) => (
               <Pressable
@@ -719,7 +738,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   sub: { color: "#9BB0C1", marginTop: 4, fontSize: 14 },
-  tabs: { flexDirection: "row", gap: 8, marginTop: 12 },
+  tabs: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 },
   tfRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: 8, paddingHorizontal: 16, paddingBottom: 12, paddingTop: 4 },
   tab: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: "#143049", alignSelf: "flex-start" },
   tabOn: { backgroundColor: "#C45C26" },
@@ -755,10 +774,11 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 8,
   },
-  btnGhost: { backgroundColor: "#2A4A66" },
+  chipGhost: { backgroundColor: "#2A4A66" },
   btnText: { color: "#FFF", fontWeight: "600" },
   meta: { color: "#8FA3B5", marginTop: 10, fontSize: 12 },
   error: { color: "#FF8F8F", marginTop: 6, fontSize: 12 },
+  connWarn: { color: "#FF8F8F", paddingHorizontal: 16, paddingTop: 4, fontSize: 12 },
   list: { padding: 16, paddingBottom: 40 },
   empty: { color: "#8FA3B5", textAlign: "center", marginTop: 40 },
   alert: {
