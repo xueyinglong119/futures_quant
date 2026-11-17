@@ -23,6 +23,7 @@ from core.hs_monitor import (
     PROVISIONAL_DURATIONS,
     HsMonitorEngine,
     in_provisional_window,
+    tier_dets,
 )
 from core.kline_store import (
     DURATION_LABELS,
@@ -248,12 +249,11 @@ class DbHsMonitor:
                     )
                 except Exception:
                     traceback.print_exc()
-            if res.det is None and res.det_strict is None:
+            dets = tier_dets(res.det_strict, res.det)
+            if not dets:
                 continue
-            # 严格档先出：同形态时它要顶掉常规档那条，模拟盘也按它的 50% 手数口径
-            for det in (res.det_strict, res.det):
-                if det is None:
-                    continue
+            # 严格档先出：同形态时常规档那条不发，模拟盘也按它的 50% 手数口径
+            for det in dets:
                 n = self.engine.deliver(
                     det,
                     alert_log=self.alert_log,

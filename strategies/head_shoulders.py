@@ -89,9 +89,9 @@ class HeadShouldersStrategy:
     两肩价差最小的候选优先，其次取最早的合格右肩，再次左右腿最均衡的，最后头高。
     肩部主导性：左肩须为其与头之间同向拐点极端；右肩之后若走出更极端的同向拐点，
     该形态在后续 K 线上自然不再成立。
-    严格档走 `on_bar_strict`，与常规档各自一套 `_traded_*`：右肩之后再走满 `strict_confirm_bars` 根
-    收盘且不创新极值才触发，肩差改用「|右肩−左肩| ÷ 左肩 ≤ DEV_THRESHOLD」量，另加形态≥8 根与
-    三段均量递减（趋势起点→左肩 / 左颈→头 / 右颈→右肩，底 2<1 且 3≤2，顶把 < 与 ≤ 对调）。
+    严格档走 `on_bar_strict`，与常规档同一根触发、同一套候选，只多几道闸：肩差改用
+    「|右肩−左肩| ÷ 左肩 ≤ DEV_THRESHOLD」量，另加形态≥8 根与三段均量递减（趋势起点→左肩 /
+    左颈→头 / 右颈→右肩，底 2<1 且 3≤2，顶把 < 与 ≤ 对调）。两档各一套 `_traded_*` 记账。
     颈线只用来算目标，不是严格档的开仓条件。
     """
 
@@ -125,7 +125,6 @@ class HeadShouldersStrategy:
         strict_signals: bool = False,
         strict_dev_threshold: float = 0.025,
         strict_min_form_bars: int = 8,
-        strict_confirm_bars: int = 2,
         strict_volume_gates: bool = True,
         strict_pulse_filter: bool = False,
         strict_pulse_multiple: float = 3.0,
@@ -158,7 +157,6 @@ class HeadShouldersStrategy:
         self.strict_signals = strict_signals
         self.strict_dev_threshold = strict_dev_threshold
         self.strict_min_form_bars = strict_min_form_bars
-        self.strict_confirm_bars = strict_confirm_bars
         self.strict_volume_gates = strict_volume_gates
         self.strict_pulse_filter = strict_pulse_filter
         self.strict_pulse_multiple = strict_pulse_multiple
@@ -174,6 +172,27 @@ class HeadShouldersStrategy:
         max_volume: int | None = None,
         symbol: str = "",
     ) -> Signal | None:
+        return self._scan(klines, max_volume, symbol, strict=False)
+
+    def on_bar_strict(
+        self,
+        klines: pd.DataFrame,
+        max_volume: int | None = None,
+        symbol: str = "",
+    ) -> Signal | None:
+        """严格档：与常规档同一根触发、同一套候选，只多几道闸。"""
+        if not self.strict_signals:
+            return None
+        return self._scan(klines, max_volume, symbol, strict=True)
+
+    def _scan(
+        self,
+        klines: pd.DataFrame,
+        max_volume: int | None,
+        symbol: str,
+        *,
+        strict: bool,
+    ) -> Signal | None:
         volume = max_volume if max_volume is not None else self.max_volume
         min_len = self.max_span_bars + self.pivot_order * 2 + 5
         if len(klines) < min_len:
@@ -188,80 +207,20 @@ class HeadShouldersStrategy:
         else:
             pivot_highs = self._with_tail_pivot(self._find_pivot_highs(highs), highs, is_high=True)
             pivot_lows = self._with_tail_pivot(self._find_pivot_lows(lows), lows, is_high=False)
-        traded = self._traded_patterns.setdefault(symbol, set())
+        # 两档各记各的账：同一形态严格档也要能独立出一条（让位与抑制都按 pattern_id 对齐）
+        traded = (self._traded_strict if strict else self._traded_patterns).setdefault(
+            symbol, set()
+        )
 
         top_signal = self._detect_head_shoulders_top(
-            pivot_highs, pivot_lows, klines, volume, traded, symbol
+            pivot_highs, pivot_lows, klines, volume, traded, symbol, strict=strict
         )
         if top_signal is not None:
             return top_signal
 
-        bottom_signal = self._detect_head_shoulders_bottom(
-            pivot_lows, pivot_highs, klines, volume, traded, symbol
-        )
-        if bottom_signal is not None:
-            return bottom_signal
-
-        return None
-
-    def on_bar_strict(
-        self,
-        klines: pd.DataFrame,
-        max_volume: int | None = None,
-        symbol: str = "",
-    ) -> Signal | None:
-        """严格档：右肩之后再走满 `strict_confirm_bars` 根收盘确认，另加价差 Dev 与三段均量闸。
-
-        右肩只能锚在倒数第 `strict_confirm_bars + 1` 根上，先用这根的 O(pivot_order)
-        极值判定挡掉绝大多数扫描，再跑与常规档同一套 `_best_break`。
-        """
-        if not self.strict_signals:
-            return None
-        volume = max_volume if max_volume is not None else self.max_volume
-        lag = self.strict_confirm_bars
-        min_len = self.max_span_bars + self.pivot_order * 2 + 5 + lag
-        if lag < 1 or len(klines) < min_len:
-            return None
-
-        highs = self._pivot_series(klines, is_high=True)
-        lows = self._pivot_series(klines, is_high=False)
-        cand_high = self._tail_pivot(highs, is_high=True, back=lag)
-        cand_low = self._tail_pivot(lows, is_high=False, back=lag)
-        if cand_high is None and cand_low is None:
-            return None
-
-        pivot_highs = self._find_pivot_highs(highs)
-        pivot_lows = self._find_pivot_lows(lows)
-        for cand, series in ((cand_high, pivot_highs), (cand_low, pivot_lows)):
-            if cand is None:
-                continue
-            if not series or series[-1][0] != cand[0]:
-                series.append(cand)
-
-        traded = self._traded_strict.setdefault(symbol, set())
-        top_signal = self._detect_head_shoulders_top(
-            pivot_highs, pivot_lows, klines, volume, traded, symbol, strict=True
-        )
-        if top_signal is not None:
-            return top_signal
         return self._detect_head_shoulders_bottom(
-            pivot_lows, pivot_highs, klines, volume, traded, symbol, strict=True
+            pivot_lows, pivot_highs, klines, volume, traded, symbol, strict=strict
         )
-
-    def _tail_pivot(
-        self, series: pd.Series, *, is_high: bool, back: int
-    ) -> tuple[int, float] | None:
-        """倒数第 `back+1` 根当时是不是尾部极值——严格档唯一可能的右肩锚点。"""
-        order = self.pivot_order
-        i = len(series) - 1 - back
-        if i < order:
-            return None
-        arr = np.asarray(series, dtype="float64")
-        val = float(arr[i])
-        seg = arr[i - order : i]
-        if is_high:
-            return (i, val) if val > float(np.fmax.reduce(seg)) else None
-        return (i, val) if val < float(np.fmin.reduce(seg)) else None
 
     def _vol_avg(self, vols: np.ndarray, a: int, b: int) -> float | None:
         """[a,b] 闭区间均量。开脉冲过滤时先剔掉 >PULSE_MULTIPLE×均值 的单根再求均值。"""
@@ -424,25 +383,6 @@ class HeadShouldersStrategy:
         if self.confirmed_shoulders:
             return last_idx == idx_r + self.pivot_order
         return idx_r == last_idx
-
-    def _strict_right_shoulder_ok(
-        self,
-        idx_r: int,
-        price_r: float,
-        last_idx: int,
-        closes: np.ndarray,
-        *,
-        bottom: bool,
-    ) -> bool:
-        """严格档触发根：右肩之后正好走满 confirm_bars 根，且这些收盘不再创新极值。"""
-        lag = self.strict_confirm_bars
-        if last_idx - idx_r != lag:
-            return False
-        tail = closes[idx_r + 1 : last_idx + 1]
-        if tail.size != lag:
-            return False
-        # 用收盘价判拐点，盘中插针不算新低/新高
-        return bool((tail > price_r).all()) if bottom else bool((tail < price_r).all())
 
     def _level_neck(self, left_anchor: float, right_anchor: float) -> float | None:
         """颈线两端要大致一样高，和形态图里的水平颈线一致。"""
@@ -841,13 +781,7 @@ class HeadShouldersStrategy:
                         self._tr(idx_l, idx_h, idx_r, "order_r")
                         continue
                     # 只在口径要求的那根上告警（默认=右肩收盘当根），错过就不补推旧形态
-                    if strict:
-                        if not self._strict_right_shoulder_ok(
-                            idx_r, price_r, last_idx, pts_arr, bottom=bottom
-                        ):
-                            self._tr(idx_l, idx_h, idx_r, "trigger")
-                            continue
-                    elif not self._right_shoulder_confirmed(idx_r, last_idx):
+                    if not self._right_shoulder_confirmed(idx_r, last_idx):
                         self._tr(idx_l, idx_h, idx_r, "trigger")
                         continue
                     if bottom and price_r <= price_h:

@@ -47,8 +47,8 @@ PROVISIONAL_WINDOWS: tuple[tuple[time, time], ...] = (
     (time(22, 30), time(23, 0)),
 )
 
-# 严格档：右肩后再走满 2 根收盘确认 + 两肩价差 Dev + 三段均量递减，优先级最高，
-# 与常规档各出一套告警（同形态时严格档顶掉常规档那条）。HS_STRICT_SIGNALS=0 可整体关掉。
+# 严格档：与常规档同刻触发，多两肩价差 Dev + 形态根数 + 三段均量递减三道闸，优先级最高
+# （同形态时只出严格档那条）。HS_STRICT_SIGNALS=0 可整体关掉。
 STRICT_SIGNALS = os.environ.get("HS_STRICT_SIGNALS", "1") != "0"
 
 
@@ -256,6 +256,23 @@ class Detection:
     strict: bool = False
 
 
+def _pattern_of(det: Detection) -> str:
+    return str((getattr(det.signal, "detail", None) or {}).get("pattern_id") or "")
+
+
+def tier_dets(strict: Detection | None, normal: Detection | None) -> list[Detection]:
+    """本轮该发的检测，严格档排在前面。
+
+    两档同刻触发：同一个形态（左/头/右三根 K 线时刻全同）时常规档让位，不重复占一条，
+    模拟盘那笔也按严格档的半仓口径下。
+    """
+    if strict is not None and normal is not None:
+        pat = _pattern_of(strict)
+        if pat and pat == _pattern_of(normal):
+            return [strict]
+    return [d for d in (strict, normal) if d is not None]
+
+
 class HsMonitorEngine:
     """持久化策略实例，按 symbol+周期在新 K 线出现时检测一次。"""
 
@@ -347,10 +364,10 @@ class HsMonitorEngine:
         duration_sec: int,
         df: pd.DataFrame,
     ) -> Detection | None:
-        """严格档单独扫一遍，比常规档晚 `strict_confirm_bars` 根出。
+        """严格档单独扫一遍，与常规档同一根触发，只是多几道闸。
 
-        它不查 `_last_bar_dt`：右肩锚点锁死在倒数第三根，同一根重复扫会被
-        `_traded_strict` 和 `_alerted` 各自挡掉，不会出两条。
+        它不查 `_last_bar_dt`：同一根重复扫会被 `_traded_strict` 和 `_alerted`
+        各自挡掉，不会出两条。
         """
         if df is None or df.empty:
             return None
@@ -388,7 +405,8 @@ class HsMonitorEngine:
     ) -> int:
         """发告警 + 通知模拟账户，同一 (品种周期, 类型, K线时刻, reason) 只发一次。
 
-        严格档那条还会顶掉同 (品种, 周期, 形态) 的常规档记录，列表里只留优先级高的。
+        严格档那条还会把同 (品种, 周期, 形态) 的**已在库**常规档记录（含抢跑那一条）
+        打上 superseded；同刻一起出的常规档在 `tier_dets` 里直接不发。
         """
         key = self._key(det.symbol, det.duration_sec)
         alert_key = f"{key}|{det.kind}|{det.last_dt.isoformat()}|{det.signal.reason}"
@@ -440,9 +458,6 @@ class HsMonitorEngine:
         if not emit:
             return 0
         n = 0
-        for item in (strict, det):
-            if item is not None:
-                n += self.deliver(
-                    item, alert_log=alert_log, push=push, toast=toast
-                )
+        for item in tier_dets(strict, det):
+            n += self.deliver(item, alert_log=alert_log, push=push, toast=toast)
         return n
