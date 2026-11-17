@@ -38,6 +38,8 @@ MARGIN_ADD = 0.01
 FEE_ADD = 0.01
 MAX_LOTS = 8
 MAX_LOSS_PER_TRADE = 1_000.0
+# 严格档是预判入场（不等颈线突破，假信号天然更多），手数只按可用资金的一半算
+STRICT_LOT_RATIO = 0.5
 # 开盘瞬间行情连接未就绪时取不到合约资料，信号先挂起，每 10 秒重试，最多 5 分钟
 PENDING_RETRY_SEC = 10.0
 PENDING_TTL_SEC = 300.0
@@ -148,6 +150,7 @@ class PendingEntry:
     alert_id: str | None
     next_try: float
     deadline: float
+    strict: bool = False
 
 
 def _num(value: Any) -> float | None:
@@ -351,7 +354,10 @@ class PaperBroker:
         entry = float(df.iloc[-1]["close"])
         if entry <= 0:
             return
+        strict = bool(detail.get("strict"))
         kind = "头肩顶" if side == "short" else "头肩底"
+        if strict:
+            kind = f"{kind}·严格"
         reason = str(getattr(signal, "reason", "") or "")
         spec = self.specs.get(symbol)
         if spec is None:
@@ -367,6 +373,7 @@ class PaperBroker:
                 kind=kind,
                 reason=reason,
                 alert_id=alert_id,
+                strict=strict,
             )
             return
         self._open_trade(
@@ -382,6 +389,7 @@ class PaperBroker:
             kind=kind,
             reason=reason,
             alert_id=alert_id,
+            strict=strict,
         )
 
     def _defer(
@@ -398,6 +406,7 @@ class PaperBroker:
         kind: str,
         reason: str,
         alert_id: str | None,
+        strict: bool = False,
     ) -> None:
         """合约资料取不到时先挂起，等行情连接就绪后按原信号价补开。"""
         when = _as_naive(when)
@@ -418,6 +427,7 @@ class PaperBroker:
             alert_id=alert_id,
             next_try=now + PENDING_RETRY_SEC,
             deadline=now + PENDING_TTL_SEC,
+            strict=strict,
         )
         name = get_display_name(symbol)
         label = DURATION_LABELS.get(duration_sec, str(duration_sec))
@@ -467,6 +477,7 @@ class PaperBroker:
                     kind=item.kind,
                     reason=item.reason,
                     alert_id=item.alert_id,
+                    strict=item.strict,
                 )
             except Exception as exc:  # noqa: BLE001
                 self._log(f"重试开仓失败 {name} {label} {item.when:%m-%d %H:%M}：{exc}")
@@ -557,17 +568,21 @@ class PaperBroker:
         kind: str,
         reason: str,
         alert_id: str | None = None,
+        strict: bool = False,
     ) -> None:
         rate, margin_lot = margin_quote(entry, spec.multiplier, spec.exchange_margin, spec.pre_settlement)
         notional = entry * spec.multiplier
         fee_lot = fee_quote(spec.exchange_fee, notional)
-        lots = max_lots(self._available(), margin_lot, fee_lot)
+        available = self._available()
+        budget = available * (STRICT_LOT_RATIO if strict else 1.0)
+        lots = max_lots(budget, margin_lot, fee_lot)
         label = DURATION_LABELS.get(duration_sec, str(duration_sec))
         name = get_display_name(symbol)
         if lots < 1:
+            note = f"（严格档只算一半 = {budget:.2f}）" if strict else ""
             self._log(
                 f"跳过 {name} {label} {when:%m-%d %H:%M}："
-                f"可用 {self._available():.2f} 不够 1 手保证金 {margin_lot:.2f}"
+                f"可用 {available:.2f}{note} 不够 1 手保证金 {margin_lot:.2f}"
             )
             return
         tp_price, sl_price = target_prices(side, entry, swing, spec.price_tick)
@@ -637,7 +652,8 @@ class PaperBroker:
         self._open[(symbol, duration_sec)] = pos
         side_text = "空" if side == "short" else "多"
         self._log(
-            f"开仓 {name} {label} {side_text} {when:%m-%d %H:%M} "
+            f"开仓 {name} {label} {side_text}{'' if not strict else '（严格档半仓）'} "
+            f"{when:%m-%d %H:%M} "
             f"价{entry:g} {lots}手 保证金{margin:.2f} 比例{rate:.4f} "
             f"手续费{fee_open:.2f} 止盈{tp_price:g} 止损{sl_price:g} 本金{equity:.2f}"
         )

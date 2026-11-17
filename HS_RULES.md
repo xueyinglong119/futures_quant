@@ -26,6 +26,7 @@
 6. 颈线锚点间隔：`n1 − idx_l ≥ gap`、`idx_r − n2 ≥ gap`，`gap` = **1m 用 3 根**（`shoulder_neck_bars`）、其余周期 1 根
 7. 肩离颈余量：每肩到颈线 `≥ 0.1 × height`（`min_shoulder_neck_ratio`，`:73`；原 0.3× 已取消）
 8. `strict_shape` 额外三条：`|左肩−右肩| ≤ 1.5% × 颈线价`；**左右腿跨度比 ≤ 2.5**（`max_shoulder_head_span_ratio`，双重/平台/三重头豁免）；颈线被收盘价穿透（容差 ±0.1×height）即拒
+   → **严格档这一条换成 `|右肩−左肩| ÷ 左肩 ≤ 0.025`**（`strict_dev_threshold`，台账 #38），其余六条两档共用。
 9. 平台头判定容差 `flat_head_tolerance_ratio = 0.1 × height`（`:76`，`68c08dc` 刚从 0.25 收紧——0.25 太宽会把普通上涨段误判成平台头，导致对称闸形同虚设）
 
 **已移除**：130 分钟跨夜间隙闸、≤5 交易日跨度闸（台账 #15、#21）。
@@ -48,6 +49,21 @@
 
 **收盘前抢跑**（11-16 加，`PROVISIONAL_DURATIONS` / `PROVISIONAL_WINDOWS` 在 `core/hs_monitor.py:43`）：14:45–15:00、22:30–23:00 这两个窗口里，把还开着的 30m/1h/2h 半截会话 K 也送去检测，右肩一露头就告警，免得等到收线已经买不到。三条硬约束：**只提醒不开仓**（抢跑走独立 `HsMonitorEngine`，`on_signal` 恒为 None，半截 K 也不喂 `broker.on_bar`）；**不碰正式路径**（独立引擎，`_traded_patterns` 分开，抢跑注册过的头不会把收线那条正式告警吃掉）；**按分钟节流**（半截 K 的内容每根 1m 才变一次，0.5s 的轮询里不重复审）。告警带 `extra.provisional=true`、kind 后缀 `·抢跑`，主告警列表照旧全部显示，App 另有「抢跑」标签页只看它们。
 
+**严格档（第二优先级通道）**（11-17 加，开关 `STRICT_SIGNALS` 在 `core/hs_monitor.py:52`，参数在 `strategies/head_shoulders.py:125`）：跟常规档**并列**的一套更挑的信号，同一条 K 线上两档各扫各的（`on_bar` / `on_bar_strict`，两套 `_traded_patterns` / `_traded_strict` 互不干扰），常规档口径一个字没改。多出来的四道闸：
+
+1. **确认更晚**：右肩之后还要**连续 `strict_confirm_bars = 2` 根收盘不创新极值**（`_strict_right_shoulder_ok`，`:428`；用收盘价，不看盘中 high/low）→ 严格档那条总比常规档晚 2 根出。
+2. **肩差换算法**：`|右肩−左肩| ÷ 左肩 ≤ strict_dev_threshold = 0.025`（`:535`）替掉闸 8 的 `1.5% × 颈线`。注意**这条更宽**（头肩底颈线低于左肩、顶高于右肩，0.025×肩价 ≈ 那条的 1.6~1.7 倍），不是「严格档=常规档子集」。
+3. **形态够长**：`idx_r − idx_l + 1 ≥ strict_min_form_bars = 8` 根。
+4. **三段均量递减**（`strict_volume_gates=True`，`_volumes_ok` `:281`）：底 = `VolAvg(头腿) < VolAvg(左肩腿)` 且 `VolAvg(右肩腿) ≤ VolAvg(头腿)`，顶把 `<` / `≤` 对调；段起点取「上一个反弹拐点 → 该锚点」，均量是段内成交量均值；`strict_pulse_filter`（默认 **关**）可先剔掉 `> strict_pulse_multiple = 3×` 均量的脉冲根再取均值。
+
+止盈止损**沿用老规则**（±0.8/∓0.2×swing），颈线只用来算目标，**不再当严格档的开仓条件**——所以严格档进场点会比颈线突破早，是「预判入场」，假信号更多，用户据此把仓位压到一半。
+
+优先级与发射：严格档那条带 kind 后缀 `·严格`、reason 前缀 `严格`、`extra.strict=true`，且带记账键 `extra.pattern = "品种|周期|pattern_id"`（`core/hs_monitor.py:213`；必须带品种和周期，`pattern_id` 只有三根 K 线时刻，不同品种会同名）。发射时把同键的常规档记录打上 `superseded`（`core/alert_store.py:85`，**只标记不删**——那条可能已推送、还挂着模拟盘单的 `alert_id`），`list_alerts` 默认不返回被顶掉的；`/api/alerts?strict=1` 单看这一档。扫描侧严格档先出、常规档后出（`core/db_monitor.py:254`），抢跑通道不参与（`core/hs_fanout.py:83`）。
+
+模拟盘：`STRICT_LOT_RATIO = 0.5`（`core/paper_trade.py:42`）→ 预算 = 可用资金 × 50% 再开满（`:577`）。但 `_open` 按 (品种, 周期) 去重，常规档那笔若已开仓，严格档这条会被「该周期已有持仓」跳过——半仓只在常规档没开成时真正生效。
+
+`HS_STRICT_SIGNALS=0` 让严格档整体静默（含告警与模拟盘），用于出对照。
+
 ## 2. 反复踩过的坑
 
 - **去重键用窗口相对下标 → 同一个头反复告警**（SH 30m 曾一个头出 4 条）。
@@ -55,6 +71,8 @@
 - **当根告警的代价**：尾部候选只要盖过前 `pivot_order` 根就算右肩，而 11-13 实测「仅凭单边就成立」的候选里 57.1%（低点侧 70.1%）会在 `pivot_order` 根内被更极端的同向拐点盖掉——这部分告警属于抢跑后被证伪，只能靠胜率数据衡量。
 - **loose / strict 是两次独立回放，改后不是改前的严格子集**：`滤掉 N 条` 是时间戳集合差，`strict − (loose ∩ strict)` 那部分是只在改后侧新出现的。别把「改后 ≤ 改前」当恒等式读。
 - **平台头豁免容差不能太宽**：0.25×头高时 lu 上涨段有 ≥4 根收盘落在带内被误判成平台头，对称闸 2.5 直接形同虚设（台账 #31）。
+- **严格档 ≠ 常规档的子集，两档条数只能按集合差读**：闸 2 的 `Dev ≤ 2.5%`（按左肩价）比常规档的 `1.5%×颈线` 宽，会放进常规档拒掉的形态；闸 1/3/4 又拒掉一批常规档收下的。实测（2026-11-17，生产 RDS 只读，60 天 × {PF, jd, eg} × {30m, 5m} 逐根滚动，`scripts/replay_strict_tier.py`）：常规档 113 条、严格档 33 条，其中同 `pattern_id` 能顶掉常规档的只有 **7** 条，严格档独占 **26** 条。同一批数据上 `on_bar` 改前/改后/两档同实例三跑输出的 `(datetime, reason)` 序列**逐条一致**（等价性守住，别拿这个当改动风险的代理）。
+- **扫描多跑一遍 strict 的代价还没实测**：`on_bar_strict` 每根都调，靠 `_tail_pivot`（`strategies/head_shoulders.py:251`）在绝大多数根 O(pivot_order) 直接返回 None，理论上比常规档那遍便宜得多，但**没上机量过**。上线后先看 `reports/monitor.log` 一圈扫描耗时和 `docker stats`，别照搬常规档那套 3.74s 稳态数字。
 - **加载窗不够会静默跳过周期**：`run_backtest.py:45` 的 `LOAD_DAYS` = 1m/5m 60 天、30m 90、1h 120、2h 150、1d 300。60 天窗里 SH 的 2h 只有约 107 根，低于阈值就不出数；中金所品种只有日盘，1h 也会缺。看到某周期整列缺失先按这个算，不是 bug。
 - `datetime_end` 字段对 raw 周期（1m/3m/5m/10m/15m）其实是**起始**时刻，只有会话合成周期（30m/1h/2h/3h/4h）才是结束时刻。
   证据：`serial_to_rows` 用 K 线的 `datetime`（=起点）算 `start_utc`（`core/realtime_pipeline.py:238`），再把它塞进 `upsert_bars` 的 `datetime_end`（`:592`）。
@@ -97,6 +115,15 @@ docker run -d --rm --name bt --env-file .env -v $PWD/reports:/app/reports -v $PW
 - 输出目录随开关变：默认 `reports/backtest/`，带 `--pivot-override`→`backtest_pivot/`，带 `--prominence`→`backtest_prom/`，带 `--outdir` 就以它为准。
 - 产物：`summary.json`（`total` + `by_tf`）、`gallery_single.html`（命中，base64 自包含，678 张 ≈27MB）、`gallery_killed.html`（被滤）、逐周期 `reports/backtest/<label>/meta_<label>.json` 与 `killed/<label>/meta_killed.json`（元素键 = `file/symbol/when/reason`）。
 - 进度看 `grep -a '\[backtest\]' reports/backtest.log | tail`；该 log 是 `>>` 追加，顶部残留上次失败行，**以最后一条表头为准**。
+
+严格档两档计数（`scripts/replay_strict_tier.py`：同一段历史逐根滚动，两档各出一遍，输出「常规档 N / 严格档 M（占 x%，顶掉同键 K，独占 M−K）」+ 每周期样例）。`--days` 给短了会整片出 0——根数不足 `max_span + 2×pivot_order + 5` 的品种会被跳过并在汇总行里点名，看到 0 先读这行，不是没信号：
+
+```bash
+docker run -d --rm --name strict_tier --env-file .env -v $PWD/reports:/app/reports -v $PWD/data:/app/data futures-quant-api sh -c "python -u scripts/replay_strict_tier.py --days 60 --workers 2 >> /app/reports/strict_tier.log 2>&1"
+```
+
+- 对照：加 `-e HS_STRICT_SIGNALS=0` 重跑一次，严格档那几列应全 0、常规档列不动——这是验证开关真的管用。
+- 本机只做轻量自检（≤3 品种 × ≤2 周期）；全市场 130 品种一律上服务器，2 机并行时 `--workers` 别超 2。
 
 规则 A/B（`scripts/ab_hs_rules.py`，OLD 用类方法补丁还原旧口径）：`HS_AB_SHARD=k/n`、`HS_AB_TFS`、`HS_AB_SYMBOLS`、`HS_AB_OUT`、`HS_AB_DUMP=1`。命令一律**写成单行**，反斜杠续行粘进终端会被截断成 `-bash: ocker: command not found`。
 

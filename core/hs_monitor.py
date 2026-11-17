@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -46,6 +47,10 @@ PROVISIONAL_WINDOWS: tuple[tuple[time, time], ...] = (
     (time(22, 30), time(23, 0)),
 )
 
+# 严格档：右肩后再走满 2 根收盘确认 + 两肩价差 Dev + 三段均量递减，优先级最高，
+# 与常规档各出一套告警（同形态时严格档顶掉常规档那条）。HS_STRICT_SIGNALS=0 可整体关掉。
+STRICT_SIGNALS = os.environ.get("HS_STRICT_SIGNALS", "1") != "0"
+
 
 def in_provisional_window(now: datetime) -> bool:
     hm = now.hour * 60 + now.minute
@@ -86,6 +91,7 @@ def make_strategy(duration_sec: int) -> HeadShouldersStrategy:
         min_head_neck_ratio=0.008,
         max_volume=1,
         duration_sec=duration_sec,
+        strict_signals=STRICT_SIGNALS,
     )
 
 
@@ -167,12 +173,15 @@ def emit_alert(
     push: bool = True,
     toast: bool = True,
     provisional: bool = False,
+    strict: bool = False,
 ) -> str | None:
     """写告警并推送，返回告警 id，供模拟账户把这笔单和告警对上。"""
     label = DURATION_LABELS.get(duration_sec, str(duration_sec))
     name = get_display_name(symbol)
     if provisional:
         kind = f"{kind}·抢跑"
+    if strict:
+        kind = f"{kind}·严格"
     title = f"{name} {label} {kind}"
     body = f"K线 {when.strftime('%m-%d %H:%M')} | {reason}"
     print(f"!!! HS_ALERT !!! {title} | {symbol} | {body}", flush=True)
@@ -197,6 +206,14 @@ def emit_alert(
     if provisional:
         # App 的「抢跑」标签页只取带这个标记的告警
         extra["provisional"] = True
+    if strict:
+        extra["strict"] = True
+    pattern_id = str((detail or {}).get("pattern_id") or "")
+    # 顶掉用的键必须带上品种和周期：pattern_id 只由三根 K 线时刻组成，不同品种会同名
+    pattern_key = f"{symbol}|{duration_sec}|{pattern_id}" if pattern_id else None
+    if pattern_key:
+        # 两档对同一形态的记账键，严格档用它找到自己的常规档那条再顶掉
+        extra["pattern"] = pattern_key
     if detail:
         extra["detail"] = detail
 
@@ -208,6 +225,7 @@ def emit_alert(
             reason=f"[{name} · {label}] {reason}",
             bar_time=when.isoformat(timespec="seconds"),
             extra=extra,
+            supersedes=pattern_key if strict else None,
         )
         alert_id = alert.id
         if push:
@@ -235,6 +253,7 @@ class Detection:
     kind: str
     signal: Any
     df: pd.DataFrame
+    strict: bool = False
 
 
 class HsMonitorEngine:
@@ -301,10 +320,7 @@ class HsMonitorEngine:
             return None
 
         key = self._key(symbol, duration_sec)
-        last_dt = pd.Timestamp(df.iloc[-1]["datetime"]).to_pydatetime()
-        if last_dt.tzinfo is not None:
-            last_dt = last_dt.replace(tzinfo=None)
-        last_dt = last_dt.replace(microsecond=0)
+        last_dt = self._last_dt(df)
         prev = self._last_bar_dt.get(key)
         if not force and prev is not None and prev == last_dt:
             return None
@@ -325,6 +341,42 @@ class HsMonitorEngine:
             df=df,
         )
 
+    def detect_strict(
+        self,
+        symbol: str,
+        duration_sec: int,
+        df: pd.DataFrame,
+    ) -> Detection | None:
+        """严格档单独扫一遍，比常规档晚 `strict_confirm_bars` 根出。
+
+        它不查 `_last_bar_dt`：右肩锚点锁死在倒数第三根，同一根重复扫会被
+        `_traded_strict` 和 `_alerted` 各自挡掉，不会出两条。
+        """
+        if df is None or df.empty:
+            return None
+        key = self._key(symbol, duration_sec)
+        strategy = self._strategy(symbol, duration_sec)
+        signal = strategy.on_bar_strict(df, max_volume=1, symbol=key)
+        if signal is None:
+            return None
+        kind = "头肩顶" if signal.action == "sell" else "头肩底"
+        return Detection(
+            symbol=symbol,
+            duration_sec=duration_sec,
+            last_dt=self._last_dt(df),
+            kind=kind,
+            signal=signal,
+            df=df,
+            strict=True,
+        )
+
+    @staticmethod
+    def _last_dt(df: pd.DataFrame) -> datetime:
+        last_dt = pd.Timestamp(df.iloc[-1]["datetime"]).to_pydatetime()
+        if last_dt.tzinfo is not None:
+            last_dt = last_dt.replace(tzinfo=None)
+        return last_dt.replace(microsecond=0)
+
     def deliver(
         self,
         det: Detection,
@@ -334,7 +386,10 @@ class HsMonitorEngine:
         toast: bool = False,
         provisional: bool = False,
     ) -> int:
-        """发告警 + 通知模拟账户，同一 (品种周期, 类型, K线时刻, reason) 只发一次。"""
+        """发告警 + 通知模拟账户，同一 (品种周期, 类型, K线时刻, reason) 只发一次。
+
+        严格档那条还会顶掉同 (品种, 周期, 形态) 的常规档记录，列表里只留优先级高的。
+        """
         key = self._key(det.symbol, det.duration_sec)
         alert_key = f"{key}|{det.kind}|{det.last_dt.isoformat()}|{det.signal.reason}"
         if alert_key in self._alerted:
@@ -351,6 +406,7 @@ class HsMonitorEngine:
             push=push,
             toast=toast,
             provisional=provisional,
+            strict=det.strict,
         )
         if self.on_signal is not None:
             try:
@@ -378,10 +434,15 @@ class HsMonitorEngine:
         force: bool = False,
         emit: bool = True,
     ) -> int:
-        """串行路径：用给定的已收盘 K 线做一次检测并按需告警。"""
+        """串行路径：用给定的已收盘 K 线做一次检测并按需告警，严格档先于常规档。"""
+        strict = self.detect_strict(symbol, duration_sec, df)
         det = self.detect(symbol, duration_sec, df, force=force)
-        if det is None or not emit:
+        if not emit:
             return 0
-        return self.deliver(
-            det, alert_log=alert_log, push=push, toast=toast
-        )
+        n = 0
+        for item in (strict, det):
+            if item is not None:
+                n += self.deliver(
+                    item, alert_log=alert_log, push=push, toast=toast
+                )
+        return n

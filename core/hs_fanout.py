@@ -38,6 +38,7 @@ class KeyResult:
     det: Detection | None
     ms: float
     prov: bool = False
+    det_strict: Detection | None = None
 
 
 def shard_of(symbol: str, count: int) -> int:
@@ -69,12 +70,17 @@ def detect_one(
     force: bool = False,
     prov: bool = False,
 ) -> KeyResult | None:
-    """取数 + 算形态，不发告警。数据为空返回 None。"""
+    """取数 + 算形态，不发告警。数据为空返回 None。
+
+    严格档另出一条（右肩后再走满 2 根收盘才确认，所以它和常规档不同根）；
+    抢跑那半截 K 只做提醒，不进严格档。
+    """
     t0 = time.perf_counter()
     df = load_tf_df(symbol, duration_sec, conn=conn)
     if df is None or df.empty:
         return None
     last_dt, bar = last_bar_of(df)
+    det_strict = None if prov else engine.detect_strict(symbol, duration_sec, df)
     det = engine.detect(symbol, duration_sec, df, force=force)
     return KeyResult(
         symbol=symbol,
@@ -84,6 +90,7 @@ def detect_one(
         det=det,
         ms=(time.perf_counter() - t0) * 1000.0,
         prov=prov,
+        det_strict=det_strict,
     )
 
 

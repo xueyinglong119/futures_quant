@@ -248,21 +248,26 @@ class DbHsMonitor:
                     )
                 except Exception:
                     traceback.print_exc()
-            if res.det is None:
+            if res.det is None and res.det_strict is None:
                 continue
-            n = self.engine.deliver(
-                res.det,
-                alert_log=self.alert_log,
-                push=True,
-                toast=False,
-            )
-            if n:
-                label = DURATION_LABELS.get(res.duration_sec, str(res.duration_sec))
-                print(
-                    f"[monitor] 告警 {res.symbol} {label} @ {res.last_dt:%Y-%m-%d %H:%M}",
-                    flush=True,
+            # 严格档先出：同形态时它要顶掉常规档那条，模拟盘也按它的 50% 手数口径
+            for det in (res.det_strict, res.det):
+                if det is None:
+                    continue
+                n = self.engine.deliver(
+                    det,
+                    alert_log=self.alert_log,
+                    push=True,
+                    toast=False,
                 )
-            alerts += n
+                if n:
+                    label = DURATION_LABELS.get(res.duration_sec, str(res.duration_sec))
+                    tag = "严格告警" if det.strict else "告警"
+                    print(
+                        f"[monitor] {tag} {res.symbol} {label} @ {res.last_dt:%Y-%m-%d %H:%M}",
+                        flush=True,
+                    )
+                alerts += n
         # 每轮都打：分片后单轮普遍 <1s，按秒数设阈值会把要看的数正好滤掉
         print(
             f"[monitor] 本轮扫描 pending={len(pending)} prov={len(prov_pending)} "

@@ -396,12 +396,14 @@ def api_list_alerts(
     unread_only: bool = Query(False),
     duration: str | None = Query(None),
     provisional: bool | None = Query(None),
+    strict: bool | None = Query(None),
 ) -> dict[str, Any]:
     items = list_alerts(
         limit=limit,
         unread_only=unread_only,
         duration=duration,
         provisional=provisional,
+        strict=strict,
     )
     for item in items:
         symbol = str(item.get("symbol") or "")
@@ -435,7 +437,11 @@ def api_alert_execution(alert_id: str) -> dict[str, Any]:
         conn.close()
     if not result.get("opened"):
         alert = next(
-            (a for a in list_alerts(limit=1000) if a.get("id") == alert_id.strip()),
+            (
+                a
+                for a in list_alerts(limit=1000, include_superseded=True)
+                if a.get("id") == alert_id.strip()
+            ),
             None,
         )
         if alert and (alert.get("extra") or {}).get("provisional"):
@@ -447,7 +453,14 @@ def api_alert_execution(alert_id: str) -> dict[str, Any]:
 @app.get("/api/alerts/{alert_id}/chart.png")
 def api_alert_chart(alert_id: str) -> Response:
     """告警的头肩形态 K 线图：蜡烛 + 左/头/右标记 + 颈线。"""
-    alert = next((a for a in list_alerts(limit=1000) if a.get("id") == alert_id.strip()), None)
+    alert = next(
+        (
+            a
+            for a in list_alerts(limit=1000, include_superseded=True)
+            if a.get("id") == alert_id.strip()
+        ),
+        None,
+    )
     if alert is None:
         raise HTTPException(404, "告警不存在")
     extra = alert.get("extra") or {}
