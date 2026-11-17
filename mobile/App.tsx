@@ -115,6 +115,15 @@ const DEFAULT_API = "http://127.0.0.1:8000";
 // 告警列表的周期筛选，"" 表示全部；与后端 DURATION_LABELS 的标签一致
 const TF_CHIPS = ["", "1m", "5m", "30m", "1h", "2h", "1d"];
 
+// 三个告警页共用一套列表：全部 / 抢跑（半截 K 提醒）/ 严格（高优先级档）
+type AlertMode = "alerts" | "prov" | "strict";
+
+const MODE_QUERY: Record<AlertMode, string> = {
+  alerts: "",
+  prov: "&provisional=1",
+  strict: "&strict=1",
+};
+
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -290,7 +299,7 @@ function barCloseText(barTime: string, durationSec?: number): string {
 }
 
 function App() {
-  const [tab, setTab] = useState<"alerts" | "prov" | "board" | "settings">("alerts");
+  const [tab, setTab] = useState<"alerts" | "prov" | "strict" | "board" | "settings">("alerts");
   const [apiBase, setApiBase] = useState(DEFAULT_API);
   const [apiInput, setApiInput] = useState(DEFAULT_API);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
@@ -302,11 +311,11 @@ function App() {
   const [boardError, setBoardError] = useState("");
   const [boardLoading, setBoardLoading] = useState(false);
   const [tf, setTf] = useState("");
-  const [provOnly, setProvOnly] = useState(false);
+  const [alertMode, setAlertMode] = useState<AlertMode>("alerts");
   const knownIds = useRef<Set<string>>(new Set());
   const seeded = useRef(false);
   const tfRef = useRef("");
-  const provRef = useRef(false);
+  const modeRef = useRef<AlertMode>("alerts");
   const appState = useRef(AppState.currentState);
 
   const base = useMemo(() => apiBase.replace(/\/$/, ""), [apiBase]);
@@ -331,8 +340,7 @@ function App() {
     try {
       const dur = tfRef.current;
       const query =
-        (dur ? `&duration=${encodeURIComponent(dur)}` : "") +
-        (provRef.current ? "&provisional=1" : "");
+        (dur ? `&duration=${encodeURIComponent(dur)}` : "") + MODE_QUERY[modeRef.current];
       const resp = await fetch(`${base}/api/alerts?limit=50${query}`);
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`);
@@ -392,10 +400,10 @@ function App() {
     }
   }, [base]);
 
-  const openAlertTab = (prov: boolean) => {
-    provRef.current = prov;
-    setProvOnly(prov);
-    setTab(prov ? "prov" : "alerts");
+  const openAlertTab = (mode: AlertMode) => {
+    modeRef.current = mode;
+    setAlertMode(mode);
+    setTab(mode);
     setLoading(true);
     fetchAlerts();
   };
@@ -439,11 +447,14 @@ function App() {
         <Text style={styles.brand}>期货形态告警</Text>
         <Text style={styles.sub}>头肩顶 / 头肩底 · 实时通知</Text>
         <View style={styles.tabs}>
-          <Pressable style={[styles.tab, tab === "alerts" ? styles.tabOn : null]} onPress={() => openAlertTab(false)}>
+          <Pressable style={[styles.tab, tab === "alerts" ? styles.tabOn : null]} onPress={() => openAlertTab("alerts")}>
             <Text style={styles.tabText}>告警</Text>
           </Pressable>
-          <Pressable style={[styles.tab, tab === "prov" ? styles.tabOn : null]} onPress={() => openAlertTab(true)}>
+          <Pressable style={[styles.tab, tab === "prov" ? styles.tabOn : null]} onPress={() => openAlertTab("prov")}>
             <Text style={styles.tabText}>抢跑</Text>
+          </Pressable>
+          <Pressable style={[styles.tab, tab === "strict" ? styles.tabOn : null]} onPress={() => openAlertTab("strict")}>
+            <Text style={styles.tabText}>严格</Text>
           </Pressable>
           <Pressable
             style={[styles.tab, tab === "board" ? styles.tabOn : null]}
@@ -527,19 +538,25 @@ function App() {
               keyExtractor={(item) => item.id}
               contentContainerStyle={styles.list}
               ListHeaderComponent={
-                provOnly ? (
+                alertMode === "prov" ? (
                   <Text style={styles.meta}>
                     抢跑＝收盘前 15 分钟拿还没收线的 30m/1h/2h 半截 K 提前预警，只提醒不开仓；到收线形态仍可能走样。
+                  </Text>
+                ) : alertMode === "strict" ? (
+                  <Text style={styles.meta}>
+                    严格＝同一根上再多三道闸（两肩价差÷左肩≤2.5%、形态≥8 根、三段均量递减）的高优先级头肩；同形态的常规告警不重复列出，模拟盘按可用资金一半开仓。
                   </Text>
                 ) : null
               }
               ListEmptyComponent={
                 <Text style={styles.empty}>
-                  {provOnly
+                  {alertMode === "prov"
                     ? "暂无抢跑提醒。日盘 14:45–15:00、夜盘 22:30–23:00 才会产生。"
-                    : tf
-                      ? `「${tf}」周期暂无告警。`
-                      : "暂无告警。新形态出现后会推到这里和通知栏。"}
+                    : alertMode === "strict"
+                      ? "暂无严格告警。要同时过肩差、形态根数、三段量能三道闸才会出。"
+                      : tf
+                        ? `「${tf}」周期暂无告警。`
+                        : "暂无告警。新形态出现后会推到这里和通知栏。"}
                 </Text>
               }
               renderItem={({ item }) => <AlertCard item={item} base={base} />}
