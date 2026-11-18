@@ -46,6 +46,7 @@
 
 **胜率口径**（`scripts/replay_winrate.py`）：信号根收盘价进场，止盈 ±0.8×swing、止损 ∓0.2×swing，`HORIZON=120` 根未决记超时，同一根 both-touch 记亏损。
 → **平衡胜率 = 0.2 / (0.8 + 0.2) = 20%**。低于 20% 就是负期望，读结果时先拿这条线卡。
+11-18 起**两档并排出数**：同一次取数上跑 `on_bar` 与 `on_bar_strict` 两遍（`replay_detail(..., strict_tier=True)`，回测里强制打开 `strict_signals`，不受生产 `HS_STRICT_SIGNALS` 静默），输出 `逐周期并排` 每档一行 + `合计` 两行。开关 `--days`（默认 60）`--tfs` `--symbols`（缺省全主力）`--workers`；根数不足 `_min_bars` 的键**会被点名**，不再静默返回空。
 
 **收盘前抢跑**（11-16 加，`PROVISIONAL_DURATIONS` / `PROVISIONAL_WINDOWS` 在 `core/hs_monitor.py:43`）：14:45–15:00、22:30–23:00 这两个窗口里，把还开着的 30m/1h/2h 半截会话 K 也送去检测，右肩一露头就告警，免得等到收线已经买不到。三条硬约束：**只提醒不开仓**（抢跑走独立 `HsMonitorEngine`，`on_signal` 恒为 None，半截 K 也不喂 `broker.on_bar`）；**不碰正式路径**（独立引擎，`_traded_patterns` 分开，抢跑注册过的头不会把收线那条正式告警吃掉）；**按分钟节流**（半截 K 的内容每根 1m 才变一次，0.5s 的轮询里不重复审）。告警带 `extra.provisional=true`、kind 后缀 `·抢跑`，主告警列表照旧全部显示，App 另有「抢跑」标签页只看它们。
 

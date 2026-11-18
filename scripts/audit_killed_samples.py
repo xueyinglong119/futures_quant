@@ -24,9 +24,18 @@ def replay_detail(
     *,
     pivot_order: int | None = None,
     prominence: float | None = None,
+    strict_tier: bool = False,
 ):
+    """逐根滚动回放信号。`strict` 是 `strict_shape` 那套质量闸，
+    `strict_tier=True` 改走严格档入口 `on_bar_strict`（两档同刻触发，闸更多）。
+
+    严格档这里强制打开 `strict_signals`：那是生产侧的总开关（`HS_STRICT_SIGNALS`），
+    回测不该被它静默掉。
+    """
     strat = make_strategy(duration_sec)
     strat.strict_shape = strict
+    if strict_tier:
+        strat.strict_signals = True
     if pivot_order is not None:
         # 只用于回测对比：缩短拐点左右确认根数
         strat.pivot_order = pivot_order
@@ -52,11 +61,12 @@ def replay_detail(
             i for i, _ in strat._find_pivot_lows(pts)
         }
     out = []
+    scan = strat.on_bar_strict if strict_tier else strat.on_bar
     for i in range(min_len - 1, len(df_all)):
         if (i if tail_mode else i - order) not in candidates:
             continue
         win = df_all.iloc[max(0, i - window) : i + 1]
-        sig = strat.on_bar(win, symbol=symbol)
+        sig = scan(win, symbol=symbol)
         if sig is not None:
             out.append(
                 {
