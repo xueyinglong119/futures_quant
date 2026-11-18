@@ -1,10 +1,10 @@
 """三重顶 / 三重底检测。
 
 形态定义（用户 11-18 给的标准图例）：趋势末端三次冲到几乎同一水平、中间两次回落到同一条
-水平颈线，**收盘越过颈线才确认形态**——底向上突破、顶向下跌破。
+水平颈线。
 
-点位（三个顶/底、两个中间回调点）一律按收盘价量，拐点确认继承头肩；区别在触发时点：
-三重不在第三脚出，而是等到颈线被收盘突破的那根才出。
+点位（三个顶/底、两个中间回调点）一律按收盘价量，拐点确认继承头肩。触发时点与头肩当前的
+尾拐点口径一致：**第三脚那根收盘确认即出**，不等颈线被突破、不补推旧形态（11-17 铁律）。
 """
 
 from __future__ import annotations
@@ -21,22 +21,21 @@ KIND_TEXT = {TOP: "三重顶", BOTTOM: "三重底"}
 
 
 class TriplePatternStrategy(HeadShouldersStrategy):
-    """三个相邻、近似等高的顶（底）+ 两个近似水平的中间回调点；收盘越过颈线才出信号。
+    """三个相邻、近似等高的顶（底）+ 两个近似水平的中间回调点，第三脚当根出信号。
 
     硬性条件全 AND：
-    ① **三个相邻极值**——P1/P2/P3 必须是连续三个确认拐点，且 P3 是最近一个。中间夹着
-    别的拐点（台阶走势）或第三脚后又出新极值，都不是三重形态；
+    ① **三个相邻极值**——P1/P2/P3 必须是连续三个拐点，且 P3 是当根。中间夹着别的
+    拐点（台阶走势）或第三脚后又出新极值，都不是三重形态；
     ② 粗筛 `Dev(P2,P1)`、`Dev(P3,P1)`、`Dev(S2,S1)` ≤ `dev_threshold`（基准取第一个）；
     ③ 形态闸——`max(P)-min(P)` 与 `|S2-S1|` ≤ `triple_head_tolerance_ratio × height`
     （与头肩三重头同一把尺）。只按价格 2.5% 卡会放过台阶/通道（2222→2190→2184、
     8284/8306/8472 那种），等高与颈线水平必须按形态高度算；
-    ④ 区间极值——`[P1, 突破根]` 内不能出现比 `min(P)`（顶为 `max(P)`）更低（高）
-    超过同一容差的收盘，否则那是被第四脚打掉的形态；
-    ⑤ **颈线突破**——底线收盘 > 颈线、顶线收盘 < 颈线，这根才是触发根；
-    ⑥ `P1→P3` 根数 ≥ `min_form_bars`、≤ `max_span_bars`；
-    ⑦ 量能——底：第三脚之后到突破根均量 > 第三段均量（图例「量增」）；
-    顶：三段均量递减（最大量 → 次大量 → 最小量），均量前剔单根天量；
-    ⑧ 形态高度三件套——≥ `min_head_neck_points` 价点、≥ `min_head_neck_ratio` 比例、
+    ④ 区间极值——`[P1, P3]` 内不能出现比 `min(P)`（顶为 `max(P)`）更低（高）超过
+    同一容差的收盘，否则那是被第四脚打掉的形态；
+    ⑤ `P1→P3` 根数 ≥ `min_form_bars`、≤ `max_span_bars`；
+    ⑥ 量能——顶 `V2 ≤ V1` 且 `V3 < V2`，底把 `<`/`≤` 对调（三段均量递减，
+    最大量 → 次大量 → 最小量），均量前剔单根天量；
+    ⑦ 形态高度三件套——≥ `min_head_neck_points` 价点、≥ `min_head_neck_ratio` 比例、
     三个极值逐个离颈线 ≥ `shoulder_prominence_ratio`×高度。
 
     时间对称只是软标记：`time_filter=False` 时 `TimeDev` 进 `detail` 与 reason，
@@ -46,7 +45,7 @@ class TriplePatternStrategy(HeadShouldersStrategy):
     def __init__(
         self,
         *args,
-        dev_threshold: float = 0.025,
+        dev_threshold: float = 0.01,
         min_form_bars: int = 10,
         time_dev_threshold: float = 0.5,
         time_filter: bool = False,
@@ -73,10 +72,16 @@ class TriplePatternStrategy(HeadShouldersStrategy):
 
         highs = self._pivot_series(klines, is_high=True)
         lows = self._pivot_series(klines, is_high=False)
-        # 颈线突破才确认：第三脚和颈线必须在突破根之前就成立，所以只用确认拐点，
-        # 不挂当根预备极值（那等于把还没站稳的第三脚当成触发点）
-        pivot_highs = self._find_pivot_highs(highs)
-        pivot_lows = self._find_pivot_lows(lows)
+        if self.confirmed_shoulders:
+            pivot_highs = self._find_pivot_highs(highs)
+            pivot_lows = self._find_pivot_lows(lows)
+        else:
+            pivot_highs = self._with_tail_pivot(
+                self._find_pivot_highs(highs), highs, is_high=True
+            )
+            pivot_lows = self._with_tail_pivot(
+                self._find_pivot_lows(lows), lows, is_high=False
+            )
         traded = self._traded_patterns.setdefault(symbol, set())
 
         top = self._detect(
@@ -101,14 +106,16 @@ class TriplePatternStrategy(HeadShouldersStrategy):
     ) -> Signal | None:
         kind = BOTTOM if bottom else TOP
         last_idx = len(klines) - 1
+        # 第三个极值必须是当根，否则这条就是被补推的旧形态
+        if not main_pivots or main_pivots[-1][0] != last_idx:
+            return None
         if len(main_pivots) < 3:
             return None
-        # 三个「相邻」极值：连续三个确认拐点，且第三个就是最近一个。
-        # 中间夹着别的拐点（台阶走势）或第三脚后又出新极值，都不是三重形态。
+        # 三个「相邻」极值：连续三个拐点。中间夹着别的拐点（台阶走势）就不是三重形态。
         (idx1, price1), (idx2, price2), (idx3, price3) = main_pivots[-3:]
         if price1 <= 0 or price2 <= 0 or price3 <= 0:
             return None
-        if idx3 >= last_idx or last_idx - idx1 > self.max_span_bars:
+        if last_idx - idx1 > self.max_span_bars:
             return None
         if abs(price2 - price1) / price1 > self.dev_threshold:
             return None
@@ -120,35 +127,11 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         vols = np.asarray(klines["volume"], dtype="float64")
         cand = self._check_legs(
             klines, vols, react_pivots, bottom,
-            (idx1, price1), (idx2, price2), (idx3, price3), last_idx,
+            (idx1, price1), (idx2, price2), (idx3, price3),
         )
         if cand is None:
             return None
-        if not self._breakout_ok(cand, klines["close"], last_idx, bottom):
-            return None
         return self._emit(cand, klines, volume, traded, symbol, bottom, kind)
-
-    def _breakout_ok(
-        self, cand: dict[str, float], closes: pd.Series, last_idx: int, bottom: bool
-    ) -> bool:
-        """当前收盘越过颈线（底向上、顶向下）才确认；越过之前不做判断。"""
-        line = self._line_at(
-            int(cand["idx_n1"]), float(cand["neck_l"]),
-            int(cand["idx_n2"]), float(cand["neck_r"]), last_idx,
-        )
-        close = float(closes.iloc[last_idx])
-        if bottom:
-            if close <= line:
-                return False
-        elif close >= line:
-            return False
-        # 第三脚之后不能再破三个极值的区间，否则形态已经被第四脚打掉
-        tol = self.triple_head_tolerance_ratio * float(cand["height"])
-        peak = float(cand["peak"])
-        seg = closes.iloc[int(cand["idx3"]) : last_idx + 1]
-        if bottom:
-            return float(seg.min()) >= peak - tol
-        return float(seg.max()) <= peak + tol
 
     def _check_legs(
         self,
@@ -159,7 +142,6 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         p1: tuple[int, float],
         p2: tuple[int, float],
         p3: tuple[int, float],
-        break_idx: int,
     ) -> dict[str, float] | None:
         """中间两个回调点 + 等高/水平/区间极值三道形态闸 + 高度三件套 + 量能。"""
         idx1, price1 = p1
@@ -199,8 +181,8 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         elif float(window.max()) > peak + tol:
             return None
 
-        # 颈线取突破根处的位置：告警与量度目标都按突破价算
-        neck = self._line_at(idx_n1, v1, idx_n2, v2, break_idx)
+        # 颈线取第三脚处的位置
+        neck = self._line_at(idx_n1, v1, idx_n2, v2, idx3)
         if height < self.min_head_neck_points:
             return None
         if height / abs(peak) < self.min_head_neck_ratio:
@@ -222,12 +204,9 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         if v_seg1 is None or v_seg2 is None or v_seg3 is None:
             return None
         if bottom:
-            # 底：第三脚之后到突破根要放量（图例里三重底标的就是「量增」）
-            v_break = self._vol_avg(vols, idx3, break_idx)
-            if v_break is None or v_break <= v_seg3:
+            if not (v_seg2 < v_seg1 and v_seg3 <= v_seg2):
                 return None
         elif not (v_seg2 <= v_seg1 and v_seg3 < v_seg2):
-            # 顶：三段量递减（最大量 → 次大量 → 最小量）
             return None
 
         t1 = idx2 - idx1
@@ -270,8 +249,7 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         neck = float(cand["neck"])
         height = float(cand["height"])
         peak = float(cand["peak"])
-        # 量度目标 = 颈线 ± 形态高度；突破入场时它才是止盈/参考目标，
-        # 颈线本身就在脚下，不能再当目标
+        # 量度目标只作参考，不参与判断，也不进止盈止损（那条仍按 0.8/0.2×高度）
         measured = neck + height if bottom else neck - height
         swing = height
         extreme = (
@@ -282,7 +260,6 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         time_dev = float(cand["time_dev"])
         neck_l_time = _format_bar_time(klines.iloc[int(cand["idx_n1"])]["datetime"])
         neck_r_time = _format_bar_time(klines.iloc[int(cand["idx_n2"])]["datetime"])
-        break_time = _format_bar_time(klines.iloc[-1]["datetime"])
         p1 = float(cand["price1"])
         p2 = float(cand["price2"])
         p3 = float(cand["price3"])
@@ -293,7 +270,7 @@ class TriplePatternStrategy(HeadShouldersStrategy):
             target_volume=volume if bottom else -volume,
             action="buy" if bottom else "sell",
             reason=(
-                f"{KIND_TEXT[kind]}颈线突破 {tag}1 {p1:.0f}({t1}) {tag}2 {p2:.0f}({t2}) "
+                f"{KIND_TEXT[kind]}确认 {tag}1 {p1:.0f}({t1}) {tag}2 {p2:.0f}({t2}) "
                 f"{tag}3 {p3:.0f}({t3}) 颈{neck:.0f} 量度{measured:.0f} {symmetric}"
             ),
             detail={
@@ -314,7 +291,6 @@ class TriplePatternStrategy(HeadShouldersStrategy):
                 "right_time": t3,
                 "neck_l_time": neck_l_time,
                 "neck_r_time": neck_r_time,
-                "break_time": break_time,
                 "left_idx": i1,
                 "head_idx": i2,
                 "right_idx": i3,
@@ -323,5 +299,5 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         self._tr(i1, i2, i3, f"selected triple-{kind}")
         return self._register_pending(
             signal, symbol, pattern_id, peak_key,
-            "long" if bottom else "short", peak, measured, traded,
+            "long" if bottom else "short", peak, neck, traded,
         )

@@ -116,7 +116,7 @@ def make_triple_strategy(duration_sec: int) -> TriplePatternStrategy:
         min_head_neck_ratio=0.008,
         max_volume=1,
         duration_sec=duration_sec,
-        dev_threshold=0.025,
+        dev_threshold=0.01,
         min_form_bars=max(10, cfg.min_span_bars),
         time_dev_threshold=0.5,
         time_filter=False,

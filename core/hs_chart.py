@@ -121,12 +121,10 @@ def render_hs_chart(
     nr = _index_of(times, _parse_detail_time(detail.get("neck_r_time"), ref))
     if nl is not None and nr is not None and nr > nl:
         pick = "close"
-        # 三重以颈线突破为触发，线要延到信号根，才能看出哪根越过去了
-        end = n - 1 if triple else nr
         slope = (bars[nr][pick] - bars[nl][pick]) / (nr - nl)
         ax.plot(
-            [nl, end],
-            [bars[nl][pick], bars[nl][pick] + slope * (end - nl)],
+            [nl, nr],
+            [bars[nl][pick], bars[nl][pick] + slope * (nr - nl)],
             linestyle="--",
             color=NECK,
             linewidth=1.2,
