@@ -25,11 +25,14 @@ def replay_detail(
     pivot_order: int | None = None,
     prominence: float | None = None,
     strict_tier: bool = False,
+    prefilter: bool = True,
     factory=make_strategy,
 ):
     """逐根滚动回放信号。`strict` 是 `strict_shape` 那套质量闸，
     `strict_tier=True` 改走严格档入口 `on_bar_strict`（两档同刻触发，闸更多）。
     `factory` 换形态家族，比如三重顶底传 `make_triple_strategy`：它只走 `on_bar`。
+    `prefilter=False` 关掉「信号必在极值根」的跳根优化——三重按颈线突破触发，
+    突破根往往不是极值根，跳过就会漏信号。
 
     严格档这里强制打开 `strict_signals`：那是生产侧的总开关（`HS_STRICT_SIGNALS`），
     回测不该被它静默掉。
@@ -65,7 +68,7 @@ def replay_detail(
     out = []
     scan = strat.on_bar_strict if strict_tier else strat.on_bar
     for i in range(min_len - 1, len(df_all)):
-        if (i if tail_mode else i - order) not in candidates:
+        if prefilter and (i if tail_mode else i - order) not in candidates:
             continue
         win = df_all.iloc[max(0, i - window) : i + 1]
         sig = scan(win, symbol=symbol)

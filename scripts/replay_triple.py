@@ -59,7 +59,9 @@ def _outcome(symbol: str, tf: int, days: int) -> tuple[list[dict], int, list[dic
         if len(bars) < _min_bars(tf):
             return [], len(bars), []
         df = bars_to_strategy_df(bars)
-        tri = replay_detail(symbol, tf, bars, False, factory=make_triple_strategy)
+        tri = replay_detail(
+            symbol, tf, bars, False, factory=make_triple_strategy, prefilter=False
+        )
         hs = replay_detail(symbol, tf, bars, False, factory=make_strategy)
         hs_whens = {s["when"] for s in hs}
         reason_by_when = {s["when"]: s["reason"] for s in tri}
