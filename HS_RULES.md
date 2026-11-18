@@ -210,7 +210,13 @@ docker run -d --rm --name triple_tier --env-file .env -v $PWD/reports:/app/repor
 
 - `撞头肩同根` = 那笔形态头肩本来也报（两条通道同刻各发一条，模拟盘只有一个坑，先到的头肩拿到开仓权）；没撞上的才是净新增覆盖面，判断"要不要留这条"就盯这个数。
 - 对照：`-e HS_TRIPLE_SIGNALS=0` 只关掉生产侧发射，**回测脚本不读这个开关**（`make_triple_strategy` 直接建实例），要出对照就 `--tfs` 逐周期比，或改跑 `replay_strict_tier.py` 的常规档列。
-- `--symbols` 限定品种、`--tfs` 限定周期；300 天窗口（2h/1d）单独一趟，别和 60 天混在同一个 `--days` 里读。
+- `--symbols` 限定品种、`--tfs` 限定周期（**这里是秒不是标签**，`--tfs 1800,3600`）；300 天窗口（2h/1d）单独一趟，别和 60 天混在同一个 `--days` 里读：
+
+```bash
+docker run -d --rm --name triple_long --env-file .env -v $PWD/reports:/app/reports -v $PWD/data:/app/data futures-quant-api sh -c "python -u scripts/replay_triple.py --days 300 --tfs 7200,86400 --workers 2 >> /app/reports/triple_long.log 2>&1"
+```
+
+进度看 `tail -n 30 reports/triple_tier.log`（逐键打「进度 N/M 已用 Xs」，没有 `[tag]` 前缀可 grep）；结果在末尾三段：逐周期计数 → 合计 → 每周期最近样例。
 
 规则 A/B（`scripts/ab_hs_rules.py`，OLD 用类方法补丁还原旧口径）：`HS_AB_SHARD=k/n`、`HS_AB_TFS`、`HS_AB_SYMBOLS`、`HS_AB_OUT`、`HS_AB_DUMP=1`。命令一律**写成单行**，反斜杠续行粘进终端会被截断成 `-bash: ocker: command not found`。
 
