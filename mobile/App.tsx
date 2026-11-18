@@ -128,6 +128,9 @@ const DEFAULT_API = "http://127.0.0.1:8000";
 // 告警列表的周期筛选，"" 表示全部；与后端 DURATION_LABELS 的标签一致
 const TF_CHIPS = ["", "1m", "5m", "30m", "1h", "2h", "1d"];
 
+// 与后端 paper_trade.MAX_LOTS 同值：超了服务端只会静默截到 8，先在 App 里拦住给中文提示
+const MAX_MANUAL_LOTS = 8;
+
 // 三个告警页共用一套列表：全部 / 抢跑（半截 K 提醒）/ 严格（高优先级档）
 type AlertMode = "alerts" | "prov" | "strict";
 
@@ -593,6 +596,7 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
     const right = item.extra?.detail?.right;
     return right === undefined || right === null ? "" : String(right);
   });
+  const [lots, setLots] = useState("1");
 
   const loadDetail = async () => {
     setLoading(true);
@@ -614,14 +618,19 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
     if (next && !detail && !loading) void loadDetail();
   };
 
-  const send = async (side: "long" | "short") => {
+  const send = async (side: "long" | "short", lotsNum: number) => {
     setBusy(true);
     setManual(null);
     try {
       const resp = await fetch(`${base}/api/paper/open`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ alert_id: item.id, side, price: Number(price.trim()) }),
+        body: JSON.stringify({
+          alert_id: item.id,
+          side,
+          price: Number(price.trim()),
+          lots: lotsNum,
+        }),
       });
       const body = await resp.json().catch(() => ({}));
       if (!resp.ok) {
@@ -645,12 +654,18 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
       setManual({ ok: false, text: "价位要填一个大于 0 的数字" });
       return;
     }
+    const n = Number(lots.trim());
+    if (!Number.isInteger(n) || n < 1 || n > MAX_MANUAL_LOTS) {
+      setManual({ ok: false, text: `手数只能是 1 到 ${MAX_MANUAL_LOTS} 的整数` });
+      return;
+    }
+    setLots(String(n));
     Alert.alert(
       side === "long" ? "买入开多" : "卖出开空",
-      `模拟盘按 ${value} 开 1 手，止盈止损仍用这条形态高度的 0.8 和 0.2。`,
+      `模拟盘按 ${value} 开 ${n} 手，止盈止损仍用这条形态高度的 0.8 和 0.2。`,
       [
         { text: "取消", style: "cancel" },
-        { text: "确认开仓", onPress: () => void send(side) },
+        { text: "确认开仓", onPress: () => void send(side, n) },
       ]
     );
   };
@@ -722,7 +737,7 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
       ) : null}
       {open && !item.extra?.provisional ? (
         <View style={styles.manualBox}>
-          <Text style={styles.manualLabel}>手动开仓（模拟盘 1 手）</Text>
+          <Text style={styles.manualLabel}>手动开仓（模拟盘）</Text>
           <View style={styles.manualRow}>
             <TextInput
               style={styles.manualInput}
@@ -732,6 +747,17 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
               placeholder="价位"
               placeholderTextColor="#7A8B9A"
             />
+            <TextInput
+              style={styles.lotsInput}
+              value={lots}
+              onChangeText={setLots}
+              keyboardType="number-pad"
+              maxLength={2}
+              placeholder="手数"
+              placeholderTextColor="#7A8B9A"
+            />
+          </View>
+          <View style={styles.manualBtnRow}>
             <Pressable style={styles.buyBtn} onPress={() => askOpen("long")} disabled={busy}>
               <Text style={styles.manualBtnText}>买入</Text>
             </Pressable>
@@ -745,7 +771,8 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
             <Text style={manual.ok ? styles.manualOk : styles.manualBad}>{manual.text}</Text>
           ) : null}
           <Text style={styles.manualHint}>
-            价位偏离最新入库价 5% 以上按填错拒单；该品种该周期已有持仓时不重复开。
+            手数 1~{MAX_MANUAL_LOTS}，保证金与手续费按手数一起扣；价位偏离最新入库价 5%
+            以上按填错拒单，可用资金不够、该品种该周期已有持仓也会拒。
           </Text>
         </View>
       ) : null}
@@ -979,8 +1006,35 @@ const styles = StyleSheet.create({
     borderColor: "#2A4A66",
     fontSize: 15,
   },
-  buyBtn: { backgroundColor: "#B3402F", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9 },
-  sellBtn: { backgroundColor: "#2E8B6F", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9 },
+  lotsInput: {
+    width: 64,
+    backgroundColor: "#0B1F33",
+    color: "#F4F0E8",
+    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: "#2A4A66",
+    fontSize: 15,
+    textAlign: "center",
+  },
+  manualBtnRow: { flexDirection: "row", gap: 8, marginTop: 8 },
+  buyBtn: {
+    flex: 1,
+    alignItems: "center",
+    backgroundColor: "#B3402F",
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  sellBtn: {
+    flex: 1,
+    alignItems: "center",
+    backgroundColor: "#2E8B6F",
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
   manualBtnText: { color: "#FFF", fontWeight: "700", fontSize: 14 },
   manualOk: { color: "#3DDC97", marginTop: 8, fontSize: 12 },
   manualBad: { color: "#FF8F8F", marginTop: 8, fontSize: 12 },
