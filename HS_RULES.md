@@ -260,7 +260,7 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
   `docker compose exec futures-monitor printenv FEISHU_WEBHOOK_URL` 应有值（只看有没有，别把值贴进聊天记录）；
   群里该收到卡片了就手动造一条（**会在群里发一条测试卡片**）：
   `docker compose exec futures-monitor python -c "from core.alert_store import Alert; from core.feishu_notify import send_alert_feishu; print(send_alert_feishu(Alert(id='t1', symbol='KQ.m@CZCE.PF', kind='头肩底·严格', reason='[短纤 · 30分钟] 推送链路自测', bar_time='2026-11-18T14:30:00', created_at='2026-11-18 14:30:01', extra={'name': '短纤', 'duration': '30分钟', 'strict': True, 'detail': {'swing': 17.0}})))"`
-  回 `{'sent': 1}` 即通；回 `no_webhook` = 变量没进容器；回 `{'sent': 0, 'code': 11232...}` 之类 = 地址对但被拒（签名校验开了却没填 `FEISHU_WEBHOOK_SECRET`，或触发限流）。之后真告警看 `grep 飞书 reports/monitor.log | tail`。
+  回 `{'sent': 1}` 即通（**11-18 已实测通过**：手机飞书收到卡片）；回 `no_webhook` = 变量没进容器；回 `{'sent': 0, 'code': 11232...}` 之类 = 地址对但被拒，最常见是机器人「安全设置」勾了**自定义关键词**而消息没命中——把关键词设成 `严格`（严格档 kind 必带「·严格」，标题正文都有），或勾了签名校验却没填 `FEISHU_WEBHOOK_SECRET`。之后真告警看 `grep 飞书 reports/monitor.log | tail`。
 - 验证真进容器：`docker compose exec futures-monitor grep -c <新函数名> /app/core/paper_trade.py`（`grep -c` 数匹配行数，只出现一次时期望值就是 `1`）。
 - `docker compose logs futures-monitor`（和 ingest）**永远是空的，不是故障**——stdout 被重定向进 `reports/*.log`，用 `tail -n 40 reports/monitor.log`。
 - 分片并发数走 `HS_WORKERS`（`.env` 或 compose `environment:`），改这个**只需 `docker compose up -d futures-monitor` 重建容器，不用 `--build`**；设成 1 等于关掉分片。生产是 4 核、ingest 常态吃掉 1 核，3 是当前的折中。
@@ -272,7 +272,7 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 
 ## 5. 未闭环
 
-- **飞书严格档推送（§1）三件事没落地**：①生产机 `.env` 还没加 `FEISHU_WEBHOOK_URL` / `HS_PUBLIC_BASE`（机器人也没在飞书群里建），没配就等于这条通道静默；②镜像还没 `--build` 部署，也没跑 §4 那条手动自测；③`mobile/App.tsx` 的推送状态文案改了，但 RN 的 JS 打进 APK，**下次出包才生效**——不影响功能。另外两点是裁决带来的边界：Expo/FCM 那条远程推送通道保持"永久不通"（小米机要 FCM 本身也不可靠，台账 #46 记了理由，别再当 bug 排查）；常规档、抢跑、三重**仍然只有 App 活着时才有通知**，要全覆盖得重开一次范围裁决。
+- **飞书严格档推送（§1）已上线并实测通过（11-18 收盘后）**：生产机 `.env` 四个变量已写、`--build` 已部署、§4 那条手动自测回 `{'sent': 1}` 且手机飞书收到卡片。还差两件：①**真告警那一跳没验过**——要等下一个交易日出现严格档，看 `grep 飞书 reports/monitor.log | tail` 有没有 `飞书推送结果: {'sent': 1}`；②`mobile/App.tsx` 的推送状态文案改了，但 RN 的 JS 打进 APK，**下次出包才生效**——不影响功能。另外两点是裁决带来的边界：Expo/FCM 那条远程推送通道保持"永久不通"（小米机要 FCM 本身也不可靠，台账 #46 记了理由，别再当 bug 排查）；常规档、抢跑、三重**仍然只有 App 活着时才有通知**，要全覆盖得重开一次范围裁决。
 - **三重顶/底（§1 新通道）三件事没做**：①全市场条数、撞头肩同根率、逐周期胜率还没跑（命令在 §3，老机 2 核两片，别在生产机工作时段跑）；②生产镜像还没部署（§4 那条 `--build futures-api futures-monitor`）；③App 头部副标题已改成「头肩 / 三重形态 · 实时通知」，但 RN 的 JS 打进 APK，**这行文案要下次出包才生效**——不影响功能（三重告警本身是数据驱动，旧包照收照显示）。
 - **三重在 5m 上可能太密，先看图再决定留不留**（11-18 本机轻量回放，2 品种 × 45 天）：5m 出 **133 条**（撞头肩同根 14，胜率 18.9%/期望 −0.011），30m 出 7 条（胜率 0%）；同期常规档头肩在这两个品种 5m 上只有个位数。全市场 5m 一趟估计数千条，`--gallery-max 800` 会截断。抽一张目视：`底1 8284 / 底2 8306 / 底3 8472` 也被判成三重底——三价差 188 点（2.3%）仍在 `Dev ≤ 2.5%` 内，**这条闸按规格给的比例放宽到能装下一个明显上升的回调**。要么收紧 Dev，要么给三重也加趋势/颈线斜率方向的闸，等画廊图看一批再定。
 - 台账里的待决策：#10 左肩≈颈线是否另加闸；#12/#13 是否单跑「仅 earliest-R」；5m 单周期细化（sym/conf 两轮里 5m 都是唯一改善的周期，但合计仍为负）。
