@@ -13,6 +13,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from core.alert_store import add_alert
+from core.feishu_notify import send_alert_feishu
 from core.kline_store import (
     DURATION_1D,
     DURATION_1H,
@@ -265,6 +266,13 @@ def emit_alert(
                     print(f"App推送结果: {push_result}", flush=True)
                 except Exception as exc:  # noqa: BLE001
                     print(f"App推送失败: {exc}", flush=True)
+                if strict:
+                    # App 被系统杀掉就收不到轮询，严格档另走飞书（亮屏交给飞书自己的保活）
+                    try:
+                        fs_result = send_alert_feishu(alert)
+                        print(f"飞书推送结果: {fs_result}", flush=True)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"飞书推送失败: {exc}", flush=True)
 
             threading.Thread(target=_push, name="hs-push", daemon=True).start()
     except Exception as exc:  # noqa: BLE001

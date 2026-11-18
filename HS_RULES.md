@@ -107,6 +107,18 @@
 
 **CPU 代价（本机微基准，随机游走 400 根滑窗、每根重扫一次）**：1m 头肩 9.27 ms + 三重 1.48 ms、5m 13.34 + 1.39、30m 29.98 + 1.50 → 这条通道只加 **5%~16%**，不是严格档那种"策略侧翻倍"。原因：三重的 `Dev(P2,P1)` / `Dev(P3,P1)` 在候选循环最外层就 `continue` 掉绝大多数组合，而头肩的开销在 `_best_break` 那三层 `li/hi/ri` 循环加 strict 主导性判定。
 
+### 告警推送通道：为什么现在是飞书（2026-11-18）
+
+**现象与根因**：App 只在活着的时候有通知——通知栏那条是 `mobile/App.tsx` 里 15 秒一轮的 `/api/alerts` 轮询 + 本地 `scheduleNotificationAsync` 发出来的，**不是远程推送**。进程被系统杀掉（国产 ROM 很积极）就没有轮询，也就没有通知。远程推送这条路一直是死的：`mobile/android/app/google-services.json` 不存在、gradle 也没挂 google-services 插件 → `getExpoPushTokenAsync` 每次必抛 → `/api/devices/register` 从没被调用 → `data/alerts.json` 的 `devices` 恒空 → 服务端 `send_alert_push` 恒回 `{"sent": 0, "detail": "no_devices"}`（`reports/monitor.log` 里每行 `App推送结果:` 都能看到）。App 里那句「通知已开启」是 `setupPush` 的 catch 分支在**掩盖**这个异常，已改成实话（「通知仅在 App 存活时推送，彻底关闭 App 后收不到」）。
+
+**为什么不接厂商通道**：小米/vivo/OPPO 的推送要求**企业开发者账号 + 应用已上架**（极光官方口径；华为个人账号可、魅族/FCM 个人可），而上架本身还要软著 + ICP + 工信部 APP 备案 + 隐私政策页，个人主体短期走不通。所以 11-18 用户裁决：**改走飞书群机器人 webhook**，亮屏、横幅、响铃交给飞书 App 自己的保活；推送范围**只发严格档**（`extra.strict`），常规档、抢跑、三重仍只进 App 列表。
+
+**现口径**：代码 `core/feishu_notify.py`，接线在 `core/hs_monitor.py` 那个已有的 `_push` 后台线程里、`strict` 为真时追加一发，失败只打 `飞书推送结果/失败` 日志，不影响告警落库与模拟盘。飞书限流 100 次/分钟、5 次/秒，严格档这个量级用不到节流。签名按官方口径 `base64(HmacSHA256(key="{timestamp}\n{secret}", msg=b""))`——**key 和 msg 的位置与常规用法相反**，写反了服务端报字段校验失败，自检里专门钉了这条。
+
+**配置**（全部 `.env`，缺 `FEISHU_WEBHOOK_URL` 整条静默跳过、回 `no_webhook`）：`FEISHU_WEBHOOK_URL` 机器人地址、`FEISHU_WEBHOOK_SECRET` 只在机器人开了「签名校验」时填、`HS_PUBLIC_BASE` 填手机能访问到的服务地址（如 `http://<公网IP>:8000`）就在卡片上加「看形态图」按钮指向 `/api/alerts/{id}/chart.png`、`HS_FEISHU_NOTIFY=0` 关掉。⚠️ 这几个值在**发送时**现读，不在 import 时读：本模块可能比 `config.settings` 的 `load_dotenv()` 更早被 import，模块级求值会把地址读成空、整条通道静默失效。
+
+**卡片**：红头标题「品种 周期 头肩底·严格」（kind 已带「·严格」，标题不重复），正文 = 加粗 reason + `K线 <bar_time>` + 有 `detail.measured`（只有三重通道带）时补「量度目标 X · 形态高度 Y」、否则只补「形态高度 Y」；底部 note 是 品种 · 周期 · `detail.pattern_kind`。自检 `_feishu_selftest.py` **20 项**（签名向量与四种写反/错分隔符、五种卡片排布、`disabled`/`no_webhook`/非 0 code/网络异常四个发送分支、以及 `emit_alert` 接线：常规档不碰飞书、严格档两路按序、`push=False` 全静默、Expo 抛异常飞书照发、飞书自己抛异常不冒到行情循环）。
+
 ### 告警页手动开仓（2026-11-18）
 
 App 每条告警展开后有一块「手动开仓（模拟盘）」：价位自己填、**手数自己填**（1~8，初值 1），**买入 = long / 卖出 = short**。它是**模拟盘**单，不是真盘下单——本仓库没有任何实盘下单通道。
@@ -243,6 +255,12 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
   服务名显式列全、**绝不带 `futures-backtest`**（一次性回测任务，裸 `up` 会把它点起来打满 CPU）。
 - 手动开仓（§1）只需要 `futures-api`（接口与 `manual_open`）和 `futures-monitor`（同步接手这笔）两个镜像新；`paper_trade.price_tick` 那列由 `ensure_schema` 在第一次调用时自己 `ALTER`，**不用手工 DDL**。核一下：`docker compose exec futures-api grep -c "def manual_open" /app/core/paper_trade.py` 期望 `1`。
 - 三重通道（§1）落在 `futures-monitor`（检测、发射、模拟盘）和 `futures-api`（`chart.png` 画 P1/P2/P3）两个镜像里，`docker compose up -d --build futures-api futures-monitor` 就够，ingest 不涉及。上线后核两件事：`docker compose exec futures-monitor grep -c "def detect_triple" /app/core/hs_monitor.py` 期望 `1`；日志里应出现 `[monitor] 三重告警 …` 这种行（没有不代表坏，代表还没遇到形态）。
+- 飞书严格档推送（§1）只在 `futures-monitor` 一个进程里发射，`docker compose up -d --build futures-api futures-monitor` 就带上了（api 侧没改动，带上是为了同批镜像）。**机器人地址要写进生产机的 `.env`**，改 `.env` 本身不需要 `--build`，但 `docker compose up -d futures-monitor` 得跑一次才会把新变量注入容器。核三件事：
+  `docker compose exec futures-monitor grep -c "def send_alert_feishu" /app/core/feishu_notify.py` 期望 `1`；
+  `docker compose exec futures-monitor printenv FEISHU_WEBHOOK_URL` 应有值（只看有没有，别把值贴进聊天记录）；
+  群里该收到卡片了就手动造一条（**会在群里发一条测试卡片**）：
+  `docker compose exec futures-monitor python -c "from core.alert_store import Alert; from core.feishu_notify import send_alert_feishu; print(send_alert_feishu(Alert(id='t1', symbol='KQ.m@CZCE.PF', kind='头肩底·严格', reason='[短纤 · 30分钟] 推送链路自测', bar_time='2026-11-18T14:30:00', created_at='2026-11-18 14:30:01', extra={'name': '短纤', 'duration': '30分钟', 'strict': True, 'detail': {'swing': 17.0}})))"`
+  回 `{'sent': 1}` 即通；回 `no_webhook` = 变量没进容器；回 `{'sent': 0, 'code': 11232...}` 之类 = 地址对但被拒（签名校验开了却没填 `FEISHU_WEBHOOK_SECRET`，或触发限流）。之后真告警看 `grep 飞书 reports/monitor.log | tail`。
 - 验证真进容器：`docker compose exec futures-monitor grep -c <新函数名> /app/core/paper_trade.py`（`grep -c` 数匹配行数，只出现一次时期望值就是 `1`）。
 - `docker compose logs futures-monitor`（和 ingest）**永远是空的，不是故障**——stdout 被重定向进 `reports/*.log`，用 `tail -n 40 reports/monitor.log`。
 - 分片并发数走 `HS_WORKERS`（`.env` 或 compose `environment:`），改这个**只需 `docker compose up -d futures-monitor` 重建容器，不用 `--build`**；设成 1 等于关掉分片。生产是 4 核、ingest 常态吃掉 1 核，3 是当前的折中。
@@ -254,6 +272,7 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 
 ## 5. 未闭环
 
+- **飞书严格档推送（§1）三件事没落地**：①生产机 `.env` 还没加 `FEISHU_WEBHOOK_URL` / `HS_PUBLIC_BASE`（机器人也没在飞书群里建），没配就等于这条通道静默；②镜像还没 `--build` 部署，也没跑 §4 那条手动自测；③`mobile/App.tsx` 的推送状态文案改了，但 RN 的 JS 打进 APK，**下次出包才生效**——不影响功能。另外两点是裁决带来的边界：Expo/FCM 那条远程推送通道保持"永久不通"（小米机要 FCM 本身也不可靠，台账 #46 记了理由，别再当 bug 排查）；常规档、抢跑、三重**仍然只有 App 活着时才有通知**，要全覆盖得重开一次范围裁决。
 - **三重顶/底（§1 新通道）三件事没做**：①全市场条数、撞头肩同根率、逐周期胜率还没跑（命令在 §3，老机 2 核两片，别在生产机工作时段跑）；②生产镜像还没部署（§4 那条 `--build futures-api futures-monitor`）；③App 头部副标题已改成「头肩 / 三重形态 · 实时通知」，但 RN 的 JS 打进 APK，**这行文案要下次出包才生效**——不影响功能（三重告警本身是数据驱动，旧包照收照显示）。
 - **三重在 5m 上可能太密，先看图再决定留不留**（11-18 本机轻量回放，2 品种 × 45 天）：5m 出 **133 条**（撞头肩同根 14，胜率 18.9%/期望 −0.011），30m 出 7 条（胜率 0%）；同期常规档头肩在这两个品种 5m 上只有个位数。全市场 5m 一趟估计数千条，`--gallery-max 800` 会截断。抽一张目视：`底1 8284 / 底2 8306 / 底3 8472` 也被判成三重底——三价差 188 点（2.3%）仍在 `Dev ≤ 2.5%` 内，**这条闸按规格给的比例放宽到能装下一个明显上升的回调**。要么收紧 Dev，要么给三重也加趋势/颈线斜率方向的闸，等画廊图看一批再定。
 - 台账里的待决策：#10 左肩≈颈线是否另加闸；#12/#13 是否单跑「仅 earliest-R」；5m 单周期细化（sym/conf 两轮里 5m 都是唯一改善的周期，但合计仍为负）。

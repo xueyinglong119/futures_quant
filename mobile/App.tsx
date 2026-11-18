@@ -406,13 +406,15 @@ function App() {
       const msg = await registerForPush(base);
       setPushStatus(msg);
     } catch (e) {
-      // FCM/Firebase 未配置时 Expo 会抛英文长错误；列表轮询仍可用，不展示干扰信息
+      // FCM/Firebase 未配置时 Expo 会抛英文长错误；此时只有 App 没被杀掉、轮询还在跑才有通知
       const raw = e instanceof Error ? e.message : String(e);
       const isFcm =
         /FirebaseApp|fcm-credentials|getExpoPushTokenAsync|Default FirebaseApp/i.test(
           raw
         );
-      setPushStatus(isFcm ? "通知已开启，新告警会显示在通知栏" : raw);
+      setPushStatus(
+        isFcm ? "通知仅在 App 存活时推送，彻底关闭 App 后收不到" : raw
+      );
     }
   }, [base]);
 

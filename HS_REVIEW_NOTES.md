@@ -251,6 +251,14 @@
 
     **顺带测出一个要用户裁决的问题**：目视那张三重底是 `底1 8284 / 底2 8306 / 底3 8472`——三价差 188 点（2.3%）仍在规格的 `Dev ≤ 2.5%` 内，画出来是一个明显在上升的回调，不是三重底。规格这个比例是按"点位"算的宽口径，比头肩的颈线比例闸松得多。要么收紧 Dev，要么给三重也加颈线斜率/趋势方向的闸，等生产上画廊一批图出来再定。
 
+46. **App 关了就收不到告警 → 严格档改推飞书**：用户 11-18 问「app 只有打开的时候才有通知栏消息，是不是没打开的时候没发送通知？严格的消息能像短信那样使屏幕亮起来吗」。两个问题都成立，而且第二个是第一个的原因：通知栏那条**从来不是远程推送**，是 `mobile/App.tsx` 里 15 秒一轮 `/api/alerts` + 本地 `scheduleNotificationAsync`；进程被国产 ROM 杀掉就没有轮询、没有通知。远程推送这条路一直是死的，链条核到底：`mobile/android/app/google-services.json` 不存在、gradle 也没挂 google-services 插件 → `getExpoPushTokenAsync` 每次必抛 → `/api/devices/register` 从没被调用 → `data/alerts.json` 的 `devices` 恒空 → 服务端 `send_alert_push` 恒回 `no_devices`（`reports/monitor.log` 每行 `App推送结果:` 都是这个）。更糟的是 App 里 `setupPush` 的 catch 把这个异常翻译成「通知已开启，新告警会显示在通知栏」——**一句谎话把一个坏掉的通道伪装成好的**，这也是 #11 挂了这么久没被当 bug 看的原因。
+
+    第一次给的选择是「接极光/个推厂商通道」，用户选了它并加了范围「只发严格档」。查证后这条路对个人主体封死：极光官方《厂商通道参数申请指南》口径是华为个人账号可且不需上架、魅族/FCM 个人可，**小米/vivo/OPPO 要求企业开发者账号 + 应用已上架**、荣耀要企业；用户手机正是小米。上架本身又还要软著 + ICP 备案 + 工信部 APP 备案 + 隐私政策页 + 公安备案，短期无解。把边界摆回去重问，用户改裁**飞书群机器人 webhook**，范围仍是只发严格档。逻辑是：亮屏、横幅、响铃全部交给飞书 App 自己的保活，我这边只负责把消息送进它已经在跑的长连接里——个人开发者唯一现成的"系统级推送"。
+
+    实现落在新模块 `core/feishu_notify.py`：交互卡片（红头「品种 周期 头肩底·严格」+ 加粗 reason + `K线 <bar_time>` + 有 `detail.measured` 时补「量度目标/形态高度」，头肩没有 measured 就只补形态高度；`HS_PUBLIC_BASE` 配了则加一个「看形态图」按钮指向 `/api/alerts/{id}/chart.png`）。签名按官方口径 `base64(HmacSHA256(key="{timestamp}\n{secret}", msg=b""))`——**key 与 msg 的位置和常规用法相反**，写反了服务端只报字段校验失败，自检里专门用"写反了必须给出不同结果"钉住。接线复用 `core/hs_monitor.py` 已有的 `_push` 后台线程，`strict` 为真时追加一发，异常一律吞在 threads 里、只打 `飞书推送结果/失败`，不碰告警落库和模拟盘。配置全走 `.env`（`FEISHU_WEBHOOK_URL`/`FEISHU_WEBHOOK_SECRET`/`HS_PUBLIC_BASE`/`HS_FEISHU_NOTIFY`），**发送时现读而不是 import 时读**：本模块可能比 `config.settings` 的 `load_dotenv()` 更早被 import，模块级求值会把地址读成空、整条通道静默失效。顺手修了 App 那句谎话，改成实话「通知仅在 App 存活时推送，彻底关闭 App 后收不到」（RN 的 JS 打进 APK，这行要下次出包生效）。
+
+    验证：`_feishu_selftest.py` **20 项全过**（签名四种写反/错分隔符都能拒、五种卡片排布、`disabled`/`no_webhook`/非 0 code/网络异常四个发送分支、`emit_alert` 接线五条：常规档不碰飞书、严格档两路按序、`push=False` 全静默、Expo 抛异常飞书照发、飞书抛异常不冒到行情循环）；回归 `_triple_selftest` 112 项、`_manual_open_selftest` 23 项、`_manual_api_selftest` 10 项、`_strict_selftest`、`_strict_emit_selftest` 全过。**没连过真实 webhook**（机器人还没建），所以「发到群里长什么样」只有等 §4 那条手动自测跑一次才算验收。#11 就此有结论：不是配置漏了，是个人主体接不了 FCM/厂商，别再当可修的 bug 看。留下的边界——常规档、抢跑、三重**仍然只有 App 活着时才有通知**，这是"只发严格档"这条裁决的直接后果，要全覆盖得重开范围裁决。
+
 ---
 
 ## 待决策冲突（需用户统一裁决）
