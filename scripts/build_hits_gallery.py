@@ -1,4 +1,8 @@
-"""把命中图目录拼成画廊页（--embed 生成 base64 单文件，可拷走离线打开）。"""
+"""把命中图目录拼成画廊页（--embed 生成 base64 单文件，可拷走离线打开）。
+
+`render_hits` 是配套的前半段：逐条把信号渲染成 PNG 落进目录并产出 meta 记录，
+`build_gallery` 再把目录拼成页。回测脚本都走这一对，别各自再抄一遍。
+"""
 
 from __future__ import annotations
 
@@ -11,12 +15,45 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from core.hs_chart import render_hs_chart  # noqa: E402
 from utils.symbols import get_display_name  # noqa: E402
 
 
 def _label(symbol: str) -> str:
     name = get_display_name(symbol)
     return f"{symbol}（{name}）" if name and name != symbol else symbol
+
+
+def render_hits(
+    symbol: str,
+    tf: int,
+    sigs: list[dict],
+    tdir: Path,
+    prefix: str,
+    conn,
+    tags: dict[str, str] | None = None,
+) -> list[dict]:
+    """渲染命中图为 PNG 并返回画廊 meta 记录；`tags` 按 `when` 给卡片补一句归属说明。"""
+    meta = []
+    if not sigs:
+        return meta
+    tdir.mkdir(parents=True, exist_ok=True)
+    for k, s in enumerate(sigs, 1):
+        png = render_hs_chart(symbol, tf, s["when"], s["detail"], conn, future_bars=15)
+        if not png:
+            continue
+        name = f"{prefix}_{symbol.replace('@', '_').replace('.', '')}_{k:02d}.png"
+        (tdir / name).write_bytes(png)
+        tag = (tags or {}).get(s["when"], "")
+        meta.append(
+            {
+                "file": name,
+                "symbol": symbol,
+                "when": s["when"],
+                "reason": f"[{tag}] {s['reason']}" if tag else s["reason"],
+            }
+        )
+    return meta
 
 
 def build_gallery(

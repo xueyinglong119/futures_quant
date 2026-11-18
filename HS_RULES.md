@@ -201,6 +201,7 @@ docker run -d --rm --name strict_tier --env-file .env -v $PWD/reports:/app/repor
 
 - 对照：加 `-e HS_STRICT_SIGNALS=0` 重跑一次，严格档那几列应全 0、常规档列不动——这是验证开关真的管用。
 - 本机只做轻量自检（≤3 品种 × ≤2 周期）；全市场 130 品种一律上服务器，2 机并行时 `--workers` 别超 2。
+- **这两个脚本现在都出画廊**（11-18 加）：严格档落 `reports/backtest_strict/` → `/backtest/strict`，三重落 `reports/backtest_triple/` → `/backtest/triple`。卡片标题带归属（`[严格档独占]` / `[同形态让位]`、`[三重独占]` / `[同根有头肩]`），要判断这两条通道值不值得留，看独占那批画出来是什么东西，光看计数看不出。渲染统一在主进程做（不是 worker），因为要按时间全局截断：`--gallery-max` 默认 800 张（base64 单文件约 30MB，再多浏览器打不开），超了只丢最早的并在副标题点名；`--no-gallery` 退回纯数字。画图逻辑与 `run_backtest.py` 共用 `build_hits_gallery.render_hits`，别再各抄一份。
 
 三重顶/底计数与胜率（`scripts/replay_triple.py`：同一段历史逐根滚动，三重与常规档头肩各跑一遍，输出每周期「三重 N 条（撞头肩同根 M）」+ 胜率行 + 每周期最近几条样例）。`--days` 短了会整片 0，根数不足一样点名：
 
@@ -247,13 +248,14 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 - 分片并发数走 `HS_WORKERS`（`.env` 或 compose `environment:`），改这个**只需 `docker compose up -d futures-monitor` 重建容器，不用 `--build`**；设成 1 等于关掉分片。生产是 4 核、ingest 常态吃掉 1 核，3 是当前的折中。
 - 分片上线后的日志标记（11-16 11:48 部署、13:30 开盘实测）：`[monitor] 检测分片已启动 workers=3` → 启动行 `poll=0.5s workers=3（只读库，不订 K 线）` → 开盘后第一轮 `水位预热 … loaded=… in …s keys=… sum=…s max=…`，之后每次有键要算都打 `本轮扫描 pending=… keys=… sum=… 用时 …s`。`docker top futures-quant-monitor | grep -c spawn_main` 期望 3。**免责条款每次启动多打 3 行不是重启循环**，是 3 个 spawn 子进程各自 import tqsdk。午休/收盘后只有 `休市 …, 15s 后再检查`，此时看不到扫描行属正常。
   扫描行原本挂了 `scan_sec >= 1.0` 阈值，分片后单轮普遍 <1s 就**一条都不打**（13:30 那批就是这样，只能反推「没打=都很快」）；已改成每轮必打，并把 `pending=` 一起带上区分「算了几键」和「几键拿到了数据」。
-- 画廊路由（只有生产机有 HTTP）：`/backtest`、`/backtest/killed`、`/backtest/pivot`、`/backtest/prom`、`/backtest/neck`。路由只是读 `reports/<变体>/gallery_*.html`，缺文件就 404 且 detail 写明缺哪个；在别的机器跑出来的要先 `scp -r` 到生产机 `/opt/futures_quant/reports/`，**到位后不用重启任何容器**。
+- 画廊路由（只有生产机有 HTTP）：`/backtest`、`/backtest/killed`、`/backtest/pivot`、`/backtest/prom`、`/backtest/neck`、`/backtest/strict`（严格档）、`/backtest/triple`（三重顶底）。路由只是读 `reports/<变体>/gallery_*.html`，缺文件就 404 且 detail 写明缺哪个；在别的机器跑出来的要先 `scp -r` 到生产机 `/opt/futures_quant/reports/`，**到位后不用重启任何容器**。
 - 生产 sshd 只认密钥（`PasswordAuthentication no`，报 `Permission denied (publickey...)` 且不问密码不是输错）。老机→生产机已互信。
 - 本地打包若 gradle 启动就炸 `Cannot find JAR 'kotlin-compiler-embeddable-2.0.21.jar' required by module 'gradle-declarative-dsl-core'`：是 `~/.gradle/wrapper/dists/gradle-8.13-bin/<hash>/` 那份解压缺了这一个 jar（同一 URL 的两个 hash 目录里，另一份是完整的）。把缺的 jar 从完整那份 `cp` 过去就好，**不用重下 130MB**（11-18 实测：`ap7pdhv…` 缺 / `5xuhj0r…` 完整，补一个文件后 `assembleRelease` 正常出包）。
 
 ## 5. 未闭环
 
 - **三重顶/底（§1 新通道）三件事没做**：①全市场条数、撞头肩同根率、逐周期胜率还没跑（命令在 §3，老机 2 核两片，别在生产机工作时段跑）；②生产镜像还没部署（§4 那条 `--build futures-api futures-monitor`）；③App 头部副标题已改成「头肩 / 三重形态 · 实时通知」，但 RN 的 JS 打进 APK，**这行文案要下次出包才生效**——不影响功能（三重告警本身是数据驱动，旧包照收照显示）。
+- **三重在 5m 上可能太密，先看图再决定留不留**（11-18 本机轻量回放，2 品种 × 45 天）：5m 出 **133 条**（撞头肩同根 14，胜率 18.9%/期望 −0.011），30m 出 7 条（胜率 0%）；同期常规档头肩在这两个品种 5m 上只有个位数。全市场 5m 一趟估计数千条，`--gallery-max 800` 会截断。抽一张目视：`底1 8284 / 底2 8306 / 底3 8472` 也被判成三重底——三价差 188 点（2.3%）仍在 `Dev ≤ 2.5%` 内，**这条闸按规格给的比例放宽到能装下一个明显上升的回调**。要么收紧 Dev，要么给三重也加趋势/颈线斜率方向的闸，等画廊图看一批再定。
 - 台账里的待决策：#10 左肩≈颈线是否另加闸；#12/#13 是否单跑「仅 earliest-R」；5m 单周期细化（sym/conf 两轮里 5m 都是唯一改善的周期，但合计仍为负）。
 - **合计仍贴着 20% 平衡线**（最近一轮 20.8%/+0.008），5m 与 1d 是稳定拖累——见台账 32 条。
 - 数据修复：11-06～11-10 的 30m/1h/2h/3h/4h 会话周期回填

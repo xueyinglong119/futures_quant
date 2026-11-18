@@ -22,8 +22,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from audit_killed_samples import replay_detail  # noqa: E402
-from build_hits_gallery import build_gallery  # noqa: E402
-from core.hs_chart import render_hs_chart  # noqa: E402
+from build_hits_gallery import build_gallery, render_hits  # noqa: E402
 from core.hs_monitor import bars_to_strategy_df  # noqa: E402
 from core.kline_store import DURATION_LABELS, connect, load_bars  # noqa: E402
 from replay_winrate import simulate_outcomes  # noqa: E402
@@ -43,23 +42,6 @@ DEFAULT_SYMBOLS = [
 DEFAULT_TFS = [60, 300, 1800, 3600, 7200, 86400]
 # 长周期形态跨周，需更长历史预热（与实盘加载满窗口一致），信号仍只统计近 days 天
 LOAD_DAYS = {60: 60, 300: 60, 1800: 90, 3600: 120, 7200: 150, 86400: 300}
-
-
-def _render(symbol: str, tf: int, sigs: list[dict], tdir: Path, prefix: str, conn) -> list[dict]:
-    meta = []
-    if not sigs:
-        return meta
-    tdir.mkdir(parents=True, exist_ok=True)
-    for k, s in enumerate(sigs, 1):
-        png = render_hs_chart(symbol, tf, s["when"], s["detail"], conn, future_bars=15)
-        if not png:
-            continue
-        name = f"{prefix}_{symbol.replace('@', '_').replace('.', '')}_{k:02d}.png"
-        (tdir / name).write_bytes(png)
-        meta.append(
-            {"file": name, "symbol": symbol, "when": s["when"], "reason": s["reason"]}
-        )
-    return meta
 
 
 def _job(job: tuple[str, int, int, str, int, int, float]) -> dict:
@@ -103,8 +85,10 @@ def _job(job: tuple[str, int, int, str, int, int, float]) -> dict:
         hit_when = {s["when"] for s in hits}
         killed = [s for s in loose if s["when"] not in hit_when]
         rows = simulate_outcomes(symbol, tf, bars_to_strategy_df(bars), hits)
-        meta = _render(symbol, tf, hits, Path(outdir) / label, "hit", conn)
-        kmeta = _render(symbol, tf, killed, Path(outdir) / "killed" / label, "killed", conn)
+        meta = render_hits(symbol, tf, hits, Path(outdir) / label, "hit", conn)
+        kmeta = render_hits(
+            symbol, tf, killed, Path(outdir) / "killed" / label, "killed", conn
+        )
     finally:
         conn.close()
     return {

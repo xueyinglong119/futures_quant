@@ -289,6 +289,22 @@ def backtest_neck_killed_page() -> FileResponse:
     return FileResponse(page, media_type="text/html")
 
 
+@app.get("/backtest/strict")
+def backtest_strict_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_strict" / "gallery_single.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="严格档画廊尚未生成（reports/backtest_strict/gallery_single.html 不存在，跑 scripts/replay_strict_tier.py）")
+    return FileResponse(page, media_type="text/html")
+
+
+@app.get("/backtest/triple")
+def backtest_triple_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_triple" / "gallery_single.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="三重顶底画廊尚未生成（reports/backtest_triple/gallery_single.html 不存在，跑 scripts/replay_triple.py）")
+    return FileResponse(page, media_type="text/html")
+
+
 @app.get("/backtest/prom")
 def backtest_prom_page() -> FileResponse:
     page = ROOT / "reports" / "backtest_prom" / "gallery_single.html"
