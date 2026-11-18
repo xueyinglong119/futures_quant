@@ -64,6 +64,17 @@
 
 `HS_STRICT_SIGNALS=0` 让严格档整体静默（含告警与模拟盘），用于出对照。代价是策略侧每根多跑完整一遍（§2 有实测比值），不是白加的。
 
+### 告警页手动开仓（2026-11-18）
+
+App 每条告警展开后有一行「手动开仓（模拟盘 1 手）」：价位自己填，**买入 = long / 卖出 = short**，默认 1 手（仍受 `MAX_LOTS=8` 封顶）。它是**模拟盘**单，不是真盘下单——本仓库没有任何实盘下单通道。
+
+- 止盈止损**沿用老规则**：距离仍取这条告警的形态高度 `detail.swing` 的 0.8 / 0.2，只是起点换成用户填的价位。swing/extreme/head 全部由服务端从告警 `extra.detail` 读，App 传不进任何金额口径。
+- 价位按最小变动价位取整后成交；`paper_trade.price_tick` 是这次新加的列（`ensure_schema` 自动 `ALTER`，老行是 NULL 就按原样不取整，等新自动单跑过就有值）。
+- 合约数字（乘数 / 保证金比例 / 手续费）来自**同品种最近一笔模拟单**里引擎自己算过的那份（`_spec_from_history`）。原因：API 进程没有天勤连接，为一次点击开一条会多占一份配额。所以从没跑过自动单的品种会直接被拒（"取不到保证金和手续费标准"）。
+- 拒单口径四条：该品种该周期**已有持仓**、价位**偏离最新入库价 > 5%**（`MANUAL_PRICE_DEV`，防手滑）、**可用资金不够** 1 手（可用 = 本金 + min(0, 浮动亏损) − 已占保证金，与自动单同一式）、抢跑提醒**不开仓**（那根 K 线还没收线）。
+- 写库后由监控进程接手：`check_loss_caps` 每 ≤10s 会 `_sync_from_db()` 把库里的持仓与本金读回内存，于是这笔手动单照样吃止盈、止损和浮亏 1000 实时止损。**这与看板手动平仓是同一套「API 直接写库 + 监控同步」机制**，代价同样是那 ≤10s 窗口内两 writes 可能互相覆盖本金（现状已存在，未新增风险面）。
+- 自检：`_manual_open_selftest.py`（23 项：取整、TP/SL、手数封顶、保证金/手续费、四类拒单、失败回滚）与 `_manual_api_selftest.py`（10 项：从告警取参、抢跑拒单、404、周期标签回退、缺 swing 拒单）全过，均为假游标，不连库。
+
 ## 2. 反复踩过的坑
 
 - **去重键用窗口相对下标 → 同一个头反复告警**（SH 30m 曾一个头出 4 条）。
@@ -167,6 +178,7 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 - **代码是 `COPY` 进镜像的，`git pull` + `restart` 等于什么都没做。** 生产上必须：
   `docker compose up -d --build futures-api futures-ingest futures-monitor`
   服务名显式列全、**绝不带 `futures-backtest`**（一次性回测任务，裸 `up` 会把它点起来打满 CPU）。
+- 手动开仓（§1）只需要 `futures-api`（接口与 `manual_open`）和 `futures-monitor`（同步接手这笔）两个镜像新；`paper_trade.price_tick` 那列由 `ensure_schema` 在第一次调用时自己 `ALTER`，**不用手工 DDL**。核一下：`docker compose exec futures-api grep -c "def manual_open" /app/core/paper_trade.py` 期望 `1`。
 - 验证真进容器：`docker compose exec futures-monitor grep -c <新函数名> /app/core/paper_trade.py`（`grep -c` 数匹配行数，只出现一次时期望值就是 `1`）。
 - `docker compose logs futures-monitor`（和 ingest）**永远是空的，不是故障**——stdout 被重定向进 `reports/*.log`，用 `tail -n 40 reports/monitor.log`。
 - 分片并发数走 `HS_WORKERS`（`.env` 或 compose `environment:`），改这个**只需 `docker compose up -d futures-monitor` 重建容器，不用 `--build`**；设成 1 等于关掉分片。生产是 4 核、ingest 常态吃掉 1 核，3 是当前的折中。

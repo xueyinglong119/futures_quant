@@ -45,6 +45,8 @@ PENDING_RETRY_SEC = 10.0
 PENDING_TTL_SEC = 300.0
 # 浮亏上限的实时盯盘间隔：会话 K 要等收线才推进，止损不能只挂在 K 线水位上
 CAP_CHECK_SEC = 10.0
+# 手动开仓价位与最新入库价的最大偏离，超过就当是填错了
+MANUAL_PRICE_DEV = 0.05
 # 小于这个数时，交易所字段更像成交额费率，而不是每手元
 _RATIO_CEILING = 0.02
 
@@ -73,6 +75,7 @@ CREATE TABLE IF NOT EXISTS `paper_trade` (
   `open_price` DOUBLE NOT NULL,
   `lots` INT NOT NULL,
   `multiplier` DOUBLE NOT NULL,
+  `price_tick` DOUBLE NULL COMMENT '最小变动价位',
   `exchange_margin` DOUBLE NOT NULL COMMENT '交易所每手保证金',
   `margin_rate` DOUBLE NOT NULL,
   `margin` DOUBLE NOT NULL COMMENT '本笔占用保证金',
@@ -599,14 +602,14 @@ class PaperBroker:
                 """
                 INSERT INTO paper_trade (
                   symbol, name, duration_sec, duration, side, kind,
-                  open_time, open_price, lots, multiplier,
+                  open_time, open_price, lots, multiplier, price_tick,
                   exchange_margin, margin_rate, margin,
                   exchange_fee, fee_per_lot, fee_open,
                   swing, extreme, head, tp_price, sl_price,
                   equity_after_open, last_price, status, reason, alert_id
                 ) VALUES (
                   %s,%s,%s,%s,%s,%s,
-                  %s,%s,%s,%s,
+                  %s,%s,%s,%s,%s,
                   %s,%s,%s,
                   %s,%s,%s,
                   %s,%s,%s,%s,%s,
@@ -615,7 +618,7 @@ class PaperBroker:
                 """,
                 (
                     symbol, name, duration_sec, label, side, kind,
-                    when, entry, lots, spec.multiplier,
+                    when, entry, lots, spec.multiplier, spec.price_tick,
                     spec.exchange_margin, rate, margin,
                     spec.exchange_fee, fee_lot, fee_open,
                     swing, extreme, head, tp_price, sl_price,
@@ -798,23 +801,33 @@ def ensure_schema(conn: Connection) -> None:
     with conn.cursor() as cur:
         cur.execute(CREATE_ACCOUNT_SQL)
         cur.execute(CREATE_TRADE_SQL)
-        cur.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = DATABASE()
-              AND TABLE_NAME = 'paper_trade'
-              AND COLUMN_NAME = 'alert_id'
-            """
-        )
-        row = cur.fetchone()
-        has_alert_id = bool(row) and int(row[0]) > 0
-        if not has_alert_id:
+        if not _has_column(cur, "paper_trade", "alert_id"):
             cur.execute(
                 "ALTER TABLE paper_trade "
                 "ADD COLUMN `alert_id` VARCHAR(36) NULL COMMENT '触发本笔的告警 id', "
                 "ADD KEY `idx_alert` (`alert_id`)"
             )
+        if not _has_column(cur, "paper_trade", "price_tick"):
+            # 手动开仓没有天勤连接，最小变动价位只能从库里的历史单回读
+            cur.execute(
+                "ALTER TABLE paper_trade "
+                "ADD COLUMN `price_tick` DOUBLE NULL COMMENT '最小变动价位' AFTER `multiplier`"
+            )
     conn.commit()
+
+
+def _has_column(cur: Any, table: str, column: str) -> bool:
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+          AND COLUMN_NAME = %s
+        """,
+        (table, column),
+    )
+    row = cur.fetchone()
+    return bool(row) and int(row[-1]) > 0
 
 
 def latest_mark_price(conn: Connection, symbol: str, duration_sec: int) -> float | None:
@@ -994,6 +1007,175 @@ def manual_close(conn: Connection, trade_id: int) -> dict[str, Any]:
         "net_pnl": net,
         "cash": cash,
         "close_reason": "手动",
+    }
+
+
+def _spec_from_history(conn: Connection, symbol: str) -> dict[str, Any] | None:
+    """同品种最近一笔模拟单里引擎算好的合约数字。
+
+    API 进程没有天勤连接（开一条要多占一份配额），手动开仓只能回读库里这份。
+    """
+    cur = conn.cursor(DictCursor)
+    try:
+        cur.execute(
+            """
+            SELECT multiplier, margin_rate, exchange_margin, exchange_fee, price_tick
+            FROM paper_trade WHERE symbol=%s ORDER BY id DESC LIMIT 1
+            """,
+            (symbol,),
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+
+
+def manual_open(
+    conn: Connection,
+    *,
+    symbol: str,
+    duration_sec: int,
+    side: str,
+    price: float,
+    swing: float,
+    extreme: float,
+    head: float,
+    alert_id: str | None = None,
+    lots: int = 1,
+) -> dict[str, Any]:
+    """告警页手动开仓：价位由用户给，止盈止损仍按这条形态高度的 0.8 / 0.2。
+
+    风控口径和自动单一致 —— 同一品种同一周期只持一笔、金额止损照常在监控里生效；
+    写进库后监控进程最迟 10 秒（`check_loss_caps` 的同步节奏）就会接手管理这笔。
+    """
+    ensure_schema(conn)
+    if side not in ("long", "short"):
+        raise ValueError("方向只能是买入或卖出")
+    price = _num(price) or 0.0
+    swing = _num(swing) or 0.0
+    extreme = _num(extreme) or 0.0
+    head = _num(head) or 0.0
+    if price <= 0:
+        raise ValueError("价位要大于 0")
+    if swing <= 0:
+        raise ValueError("这条告警没有形态高度，算不出止盈止损")
+    lots = max(1, min(int(lots), MAX_LOTS))
+    spec = _spec_from_history(conn, symbol)
+    if not spec:
+        raise ValueError("这个品种还没有过模拟单，取不到保证金和手续费标准")
+    multiplier = _num(spec["multiplier"]) or 0.0
+    rate = _num(spec["margin_rate"]) or 0.0
+    exchange_fee = _num(spec["exchange_fee"])
+    exchange_margin = _num(spec["exchange_margin"]) or 0.0
+    if multiplier <= 0 or rate <= 0 or exchange_fee is None:
+        raise ValueError("历史单里的合约数字不完整，等这条自动单跑过再试")
+    tick = _num(spec["price_tick"]) or 0.0
+    entry = round_tick(float(price), tick)
+    mark = latest_mark_price(conn, symbol, int(duration_sec))
+    if mark is None or mark <= 0:
+        raise ValueError("还没有可参考的入库价，先等 K 线写进库")
+    if abs(entry - mark) / mark > MANUAL_PRICE_DEV:
+        raise ValueError(
+            f"价位 {entry:g} 偏离最新入库价 {mark:g} 超过 {MANUAL_PRICE_DEV:.0%}，可能填错了"
+        )
+    margin_lot = entry * multiplier * rate
+    fee_lot = fee_quote(exchange_fee, entry * multiplier)
+    cur = conn.cursor(DictCursor)
+    try:
+        cur.execute("SELECT cash FROM paper_account WHERE id=1")
+        account = cur.fetchone()
+        if account is None:
+            raise ValueError("模拟账户不存在")
+        cash = float(account["cash"])
+        cur.execute(
+            """
+            SELECT symbol, duration_sec, side, open_price, multiplier, lots,
+                   margin, last_price
+            FROM paper_trade WHERE status='open'
+            """
+        )
+        held = cur.fetchall()
+        for item in held:
+            if str(item["symbol"]) == symbol and int(item["duration_sec"]) == int(duration_sec):
+                raise ValueError("该品种该周期已有持仓")
+        margin_used = sum(float(item["margin"]) for item in held)
+        unrealized = sum(
+            price_pnl(
+                str(item["side"]),
+                float(item["open_price"]),
+                float(item["last_price"]),
+                float(item["multiplier"]),
+                int(item["lots"]),
+            )
+            for item in held
+        )
+        available = cash + min(0.0, unrealized) - margin_used
+        if available < (margin_lot + fee_lot) * lots:
+            raise ValueError(
+                f"可用 {available:.2f} 不够 {lots} 手"
+                f"（每手保证金 {margin_lot:.2f} + 手续费 {fee_lot:.2f}）"
+            )
+        fee_open = money(fee_lot * lots)
+        if cash - fee_open <= 0:
+            raise ValueError("开仓手续费后本金不足")
+        tp_price, sl_price = target_prices(side, entry, swing, tick)
+        margin = money(margin_lot * lots)
+        cash_after = money(cash - fee_open)
+        equity = money(cash_after + unrealized)
+        name = get_display_name(symbol)
+        label = DURATION_LABELS.get(int(duration_sec), str(duration_sec))
+        side_text = "买入" if side == "long" else "卖出"
+        cur.execute(
+            """
+            INSERT INTO paper_trade (
+              symbol, name, duration_sec, duration, side, kind,
+              open_time, open_price, lots, multiplier, price_tick,
+              exchange_margin, margin_rate, margin,
+              exchange_fee, fee_per_lot, fee_open,
+              swing, extreme, head, tp_price, sl_price,
+              equity_after_open, last_price, status, reason, alert_id
+            ) VALUES (
+              %s,%s,%s,%s,%s,%s,
+              %s,%s,%s,%s,%s,
+              %s,%s,%s,
+              %s,%s,%s,
+              %s,%s,%s,%s,%s,
+              %s,%s,'open',%s,%s
+            )
+            """,
+            (
+                symbol, name, int(duration_sec), label, side, "手动",
+                store_clock_now(int(duration_sec)), entry, lots, multiplier, tick,
+                exchange_margin, rate, margin,
+                exchange_fee, fee_lot, fee_open,
+                swing, extreme, head, tp_price, sl_price,
+                equity, entry,
+                f"手动{side_text} @ {entry:g}"[:255],
+                alert_id,
+            ),
+        )
+        trade_id = int(cur.lastrowid)
+        cur.execute("UPDATE paper_account SET cash=%s WHERE id=1", (cash_after,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+    return {
+        "trade_id": trade_id,
+        "symbol": symbol,
+        "name": name,
+        "duration": label,
+        "side": side,
+        "side_text": "多" if side == "long" else "空",
+        "open_price": entry,
+        "lots": lots,
+        "margin": margin,
+        "fee_open": fee_open,
+        "tp_price": tp_price,
+        "sl_price": sl_price,
+        "cash": cash_after,
+        "mark": mark,
     }
 
 

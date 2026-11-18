@@ -20,6 +20,16 @@ import Constants from "expo-constants";
 import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
 
+type HsDetail = {
+  side?: string;
+  swing?: number;
+  right?: number;
+  neck?: number;
+  head?: number;
+  extreme?: number;
+  strict?: boolean;
+};
+
 type AlertItem = {
   id: string;
   symbol: string;
@@ -34,6 +44,9 @@ type AlertItem = {
     display?: string;
     code?: string;
     duration_sec?: number;
+    provisional?: boolean;
+    strict?: boolean;
+    detail?: HsDetail;
   };
 };
 
@@ -573,11 +586,15 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
   const [detail, setDetail] = useState<ExecutionDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [manual, setManual] = useState<{ ok: boolean; text: string } | null>(null);
+  // 右肩价就是告警当根已收盘 K 线的收盘价，拿来当手动价位的初值
+  const [price, setPrice] = useState(() => {
+    const right = item.extra?.detail?.right;
+    return right === undefined || right === null ? "" : String(right);
+  });
 
-  const toggle = async () => {
-    const next = !open;
-    setOpen(next);
-    if (!next || detail || loading) return;
+  const loadDetail = async () => {
     setLoading(true);
     setError("");
     try {
@@ -591,23 +608,73 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
     }
   };
 
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && !detail && !loading) void loadDetail();
+  };
+
+  const send = async (side: "long" | "short") => {
+    setBusy(true);
+    setManual(null);
+    try {
+      const resp = await fetch(`${base}/api/paper/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ alert_id: item.id, side, price: Number(price.trim()) }),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(typeof body.detail === "string" ? body.detail : `HTTP ${resp.status}`);
+      }
+      setManual({
+        ok: true,
+        text: `已开${body.side_text} ${body.lots} 手 @ ${body.open_price}　止盈 ${body.tp_price}　止损 ${body.sl_price}　保证金 ${Number(body.margin).toFixed(0)}`,
+      });
+      void loadDetail();
+    } catch (e) {
+      setManual({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const askOpen = (side: "long" | "short") => {
+    const value = Number(price.trim());
+    if (!(value > 0)) {
+      setManual({ ok: false, text: "价位要填一个大于 0 的数字" });
+      return;
+    }
+    Alert.alert(
+      side === "long" ? "买入开多" : "卖出开空",
+      `模拟盘按 ${value} 开 1 手，止盈止损仍用这条形态高度的 0.8 和 0.2。`,
+      [
+        { text: "取消", style: "cancel" },
+        { text: "确认开仓", onPress: () => void send(side) },
+      ]
+    );
+  };
+
   const code = item.extra?.code || item.symbol;
   const name = item.extra?.name || productNameFromSymbol(code);
   const duration = item.extra?.duration ? ` · ${item.extra.duration}` : "";
   const trade = detail?.trade;
   return (
-    <Pressable style={[styles.alert, item.read ? null : styles.alertNew]} onPress={toggle}>
-      <Text style={styles.alertTitle}>
-        {name}
-        {duration} · {item.kind}
-      </Text>
-      <Text style={styles.alertCode}>{code}</Text>
-      <Text style={styles.alertTime}>
-        K线收盘 {barCloseText(item.bar_time, item.extra?.duration_sec)}
-      </Text>
-      <Text style={styles.alertTime}>发现时间 {item.created_at}</Text>
-      <Text style={styles.alertReason}>{item.reason}</Text>
-      <Text style={styles.detailHint}>{open ? "收起执行详情 ▲" : "查看执行详情 ▼"}</Text>
+    <View style={[styles.alert, item.read ? null : styles.alertNew]}>
+      {/* 输入框和按钮不能压在整卡 Pressable 里，否则点一下就把卡片收起来了 */}
+      <Pressable onPress={toggle}>
+        <Text style={styles.alertTitle}>
+          {name}
+          {duration} · {item.kind}
+        </Text>
+        <Text style={styles.alertCode}>{code}</Text>
+        <Text style={styles.alertTime}>
+          K线收盘 {barCloseText(item.bar_time, item.extra?.duration_sec)}
+        </Text>
+        <Text style={styles.alertTime}>发现时间 {item.created_at}</Text>
+        <Text style={styles.alertReason}>{item.reason}</Text>
+        <Text style={styles.detailHint}>{open ? "收起执行详情 ▲" : "查看执行详情 ▼"}</Text>
+      </Pressable>
       {open ? (
         <Image
           source={{ uri: `${base}/api/alerts/${encodeURIComponent(item.id)}/chart.png` }}
@@ -653,7 +720,36 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
           </View>
         ) : null
       ) : null}
-    </Pressable>
+      {open && !item.extra?.provisional ? (
+        <View style={styles.manualBox}>
+          <Text style={styles.manualLabel}>手动开仓（模拟盘 1 手）</Text>
+          <View style={styles.manualRow}>
+            <TextInput
+              style={styles.manualInput}
+              value={price}
+              onChangeText={setPrice}
+              keyboardType="decimal-pad"
+              placeholder="价位"
+              placeholderTextColor="#7A8B9A"
+            />
+            <Pressable style={styles.buyBtn} onPress={() => askOpen("long")} disabled={busy}>
+              <Text style={styles.manualBtnText}>买入</Text>
+            </Pressable>
+            <Pressable style={styles.sellBtn} onPress={() => askOpen("short")} disabled={busy}>
+              <Text style={styles.manualBtnText}>卖出</Text>
+            </Pressable>
+          </View>
+          {busy ? (
+            <ActivityIndicator color="#E8B86D" style={{ marginTop: 8 }} />
+          ) : manual ? (
+            <Text style={manual.ok ? styles.manualOk : styles.manualBad}>{manual.text}</Text>
+          ) : null}
+          <Text style={styles.manualHint}>
+            价位偏离最新入库价 5% 以上按填错拒单；该品种该周期已有持仓时不重复开。
+          </Text>
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -863,6 +959,32 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   closeBtnText: { color: "#FFF", fontWeight: "700" },
+  manualBox: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: "#2A4A66",
+  },
+  manualLabel: { color: "#E8B86D", fontSize: 13, fontWeight: "600", marginBottom: 8 },
+  manualRow: { flexDirection: "row", gap: 8, alignItems: "center" },
+  manualInput: {
+    flex: 1,
+    minWidth: 70,
+    backgroundColor: "#0B1F33",
+    color: "#F4F0E8",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: "#2A4A66",
+    fontSize: 15,
+  },
+  buyBtn: { backgroundColor: "#B3402F", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9 },
+  sellBtn: { backgroundColor: "#2E8B6F", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9 },
+  manualBtnText: { color: "#FFF", fontWeight: "700", fontSize: 14 },
+  manualOk: { color: "#3DDC97", marginTop: 8, fontSize: 12 },
+  manualBad: { color: "#FF8F8F", marginTop: 8, fontSize: 12 },
+  manualHint: { color: "#7A8B9A", marginTop: 8, fontSize: 11, lineHeight: 16 },
 });
 
 class AppErrorBoundary extends React.Component<

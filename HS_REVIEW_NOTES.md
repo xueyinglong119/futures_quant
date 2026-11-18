@@ -202,6 +202,16 @@
 
     `npx tsc --noEmit` 零错；本地 `./gradlew assembleRelease` **1m46s** 出包（12 executed / 237 up-to-date，日志里能看到 `createBundleReleaseJsAndAssets` 真跑了 Metro，不是空转），产物 `mobile/android/app/build/outputs/apk/release/app-release.apk` **54.6 MiB / 16:52:34**，bundle 1,206,104 字节，UTF-16 探针（`_apk_strict_probe.py`）核到「暂无严格告警」「严格＝同一根上再多三道闸」两条新串都在，旧串「暂无抢跑提醒」「K线收盘」也都在。**验收**：装上后确认六个 chip 都在、严格页在非行情时段给空态文案不报错、告警页仍能看到带 `·严格` 后缀的条目；服务端还没出过严格档条子之前，严格页为空是正常的（生产已部署 `4bedf59`，第一批要等夜盘收线）。
 
+41. **告警页加手动开仓（价位输入 + 买入 / 卖出）**：用户 11-18 要求「手机APP再告警页面中，给我加上开仓的按钮，可以输入价位，然后买入和卖出按钮」。先把边界说清：本仓库**没有实盘下单通道**（`set_target_volume` 只活在回测/模拟里，实盘账户不存在），所以这两个按钮落在模拟盘账户上——与自动单同一个本金、同一套止盈止损和浮亏 1000 实时止损。
+
+    架构上的真障碍是**合约数字只在监控进程拿得到**：`ContractBook` 从天勤 quote 读乘数/保证金/手续费，而 API 容器里没有 TqApi。三条路里选了最省的一条——`_spec_from_history` 回读**同品种最近一笔模拟单**里引擎自己算过的 `multiplier / margin_rate / exchange_fee / price_tick`：不为一次点击多开一条天勤连接（配额是硬约束），也不新增跨进程队列表。代价是从没自动单跑过的品种开不了仓，直接拒。止盈止损仍按这条告警 `detail.swing` 的 0.8 / 0.2，swing/extreme/head 全部由服务端从 `extra.detail` 取，App 只能传 alert_id + 方向 + 价位，改不动任何金额口径。
+
+    落点：`POST /api/paper/open`（`api/app.py`）+ `manual_open()`（`core/paper_trade.py`）。`paper_trade` 多一列 `price_tick`，走 `ensure_schema` 里既有的 information_schema 探测 + `ALTER` 自动补，**不需手工 DDL**；老行是 NULL 时价位不取整，等新自动单跑过就有值。风控四条拒单：同品种同周期已有持仓、价位偏离最新入库价 >5%（`MANUAL_PRICE_DEV`，防手滑）、可用资金不足 1 手、抢跑提醒不给开。默认 **1 手**（自动单仍是可用资金开满 ≤8 手）——手机上一点就满仓风险太大，要放大再谈档位。这笔单写库后由监控 `check_loss_caps` 的 ≤10s `_sync_from_db()` 接手管理，与看板手动平仓共用同一套「API 直接写库、监控同步」机制；那个 ≤10s 内两处写本金可能互相覆盖是**既有代价**，本次没有新增风险面。
+
+    App 侧把 `AlertCard` 的根从 `Pressable` 换成 `View`、只在头部文字区挂 `onPress`：输入框和按钮若压在整卡 `Pressable` 里，点输入框会先触发"收起卡片"。展开区在图表与执行详情之后加一行价位输入（初值取告警的右肩价 = 确认那根的收盘价）+ 红「买入」/ 绿「卖出」，二次确认后才 POST，成功回显「已开多 N 手 @ 价　止盈　止损　保证金」并重拉执行详情；抢跑卡片不渲染这一行。`AlertItem.extra` 类型补上 `detail`（服务端一直在发，只是 TS 里没写）。
+
+    验证（本机，不连库不动生产）：`_manual_open_selftest.py` 23 项全过——取整、两档方向 TP/SL、手数封顶、每手保证金 3580×10×0.13=4654、手续费 3+0.01、本金扣费、四类拒单、写库失败回滚不提交；`_manual_api_selftest.py` 10 项全过——从告警取参、抢跑拒单、404、只有周期标签时回退、缺 swing 拒单、价位越界拒单；`npx tsc --noEmit` 零错。**待线上验收**：部署新镜像 + 装新包 → 展开一条已收线告警 → 填价 → 买入 → 看板出现这笔（kind=手动）、止盈止损按形态高度、浮亏超 1000 仍被监控平掉；再故意填一个偏离 5% 以上的价，确认拒单文案是中文可读的。
+
 ---
 
 ## 待决策冲突（需用户统一裁决）

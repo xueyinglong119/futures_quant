@@ -21,7 +21,13 @@ from core.indicators import (
     latest_indicator_snapshot,
 )
 from core.kline_store import LABEL_TO_DURATION, connect, ensure_table, load_bars
-from core.paper_trade import account_snapshot, alert_execution, manual_close, trading_board
+from core.paper_trade import (
+    account_snapshot,
+    alert_execution,
+    manual_close,
+    manual_open,
+    trading_board,
+)
 from core.market_data import DEFAULT_KLINE_SECONDS, get_today_klines
 from core.push_notify import send_alert_push
 
@@ -58,6 +64,13 @@ class CreateAlertBody(BaseModel):
 class RegisterDeviceBody(BaseModel):
     token: str
     platform: str = "android"
+
+
+class ManualOpenBody(BaseModel):
+    alert_id: str
+    side: Literal["long", "short"]
+    price: float = Field(gt=0)
+    lots: int = Field(1, ge=1, le=8)
 
 
 @app.get("/")
@@ -383,6 +396,50 @@ def api_paper_close(trade_id: int = Query(..., ge=1, description="持仓单号")
     try:
         try:
             result = manual_close(conn, trade_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, **result}
+    finally:
+        conn.close()
+
+
+@app.post("/api/paper/open")
+def api_paper_open(body: ManualOpenBody) -> dict[str, Any]:
+    """告警页手动开仓：价位由用户填，止盈止损仍按这条告警的形态高度，默认 1 手。"""
+    alert = next(
+        (
+            a
+            for a in list_alerts(limit=1000, include_superseded=True)
+            if a.get("id") == body.alert_id.strip()
+        ),
+        None,
+    )
+    if alert is None:
+        raise HTTPException(status_code=404, detail="告警不存在")
+    extra = alert.get("extra") or {}
+    if extra.get("provisional"):
+        raise HTTPException(status_code=400, detail="抢跑提醒那根 K 线还没收线，不支持手动开仓")
+    detail = extra.get("detail") or {}
+    duration_sec = extra.get("duration_sec")
+    if not duration_sec:
+        duration_sec = LABEL_TO_DURATION.get(str(extra.get("duration") or ""))
+    if not duration_sec:
+        raise HTTPException(status_code=400, detail="这条告警没有周期信息")
+    conn = connect()
+    try:
+        try:
+            result = manual_open(
+                conn,
+                symbol=str(alert["symbol"]),
+                duration_sec=int(duration_sec),
+                side=body.side,
+                price=float(body.price),
+                swing=detail.get("swing"),
+                extreme=detail.get("extreme"),
+                head=detail.get("head"),
+                alert_id=str(alert["id"]),
+                lots=body.lots,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, **result}
