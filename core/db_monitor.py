@@ -22,6 +22,7 @@ from core.hs_monitor import (
     HS_MONITOR_DURATIONS,
     PROVISIONAL_DURATIONS,
     HsMonitorEngine,
+    alert_tag,
     in_provisional_window,
     tier_dets,
 )
@@ -250,6 +251,10 @@ class DbHsMonitor:
                 except Exception:
                     traceback.print_exc()
             dets = tier_dets(res.det_strict, res.det)
+            # 三重是第三条独立通道，排在最后：同根上头肩与三重都成立时两条都发，
+            # 但模拟盘每个 (品种, 周期) 只有一个坑，先到的头肩拿到开仓权。
+            if res.det_triple is not None:
+                dets.append(res.det_triple)
             if not dets:
                 continue
             # 严格档先出：同形态时常规档那条不发，模拟盘也按它的 50% 手数口径
@@ -262,7 +267,7 @@ class DbHsMonitor:
                 )
                 if n:
                     label = DURATION_LABELS.get(res.duration_sec, str(res.duration_sec))
-                    tag = "严格告警" if det.strict else "告警"
+                    tag = alert_tag(det)
                     print(
                         f"[monitor] {tag} {res.symbol} {label} @ {res.last_dt:%Y-%m-%d %H:%M}",
                         flush=True,

@@ -461,7 +461,7 @@ function App() {
       <StatusBar barStyle="light-content" />
       <View style={styles.header}>
         <Text style={styles.brand}>期货形态告警</Text>
-        <Text style={styles.sub}>头肩顶 / 头肩底 · 实时通知</Text>
+        <Text style={styles.sub}>头肩 / 三重形态 · 实时通知</Text>
         <View style={styles.tabs}>
           <Pressable style={[styles.tab, tab === "alerts" ? styles.tabOn : null]} onPress={() => openAlertTab("alerts")}>
             <Text style={styles.tabText}>告警</Text>

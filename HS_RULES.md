@@ -79,6 +79,34 @@
 
 `HS_STRICT_SIGNALS=0` 让严格档整体静默（含告警与模拟盘），用于出对照。代价是策略侧每根多跑完整一遍（§2 有实测比值），不是白加的。
 
+### 三重顶 / 三重底通道（2026-11-18）
+
+第三条独立通道，与头肩两条**同根各自记账、两条都发**（用户裁决③）。代码 `strategies/triple_pattern.py`：`TriplePatternStrategy` **继承** `HeadShouldersStrategy` 只覆写 `_scan`，所以点位口径（收盘价量）、拐点确认、"第三极值当根即出"用的是同一份实现，`detail` 形状也与头肩一致——图表、手动开仓、模拟盘三处不用改协议。开关 `HS_TRIPLE_SIGNALS`（默认开，`core/hs_monitor.py:56`），工厂 `make_triple_strategy`（`:102`）。
+
+**硬条件（全 AND）**
+
+| 项 | 现口径 | 备注 |
+|----|--------|------|
+| 三顶等高 | `Dev(P2,P1) ≤ 0.025` 且 `Dev(P3,P1) ≤ 0.025`，`Dev = abs(点位−基准) ÷ 基准`，基准取 P1 | `DEV_THRESHOLD`，规格「不要求完全一样高」靠它实现 |
+| 颈线水平 | 两个中间回调点 `Dev(S2,S1) ≤ 0.025` | 顶用反弹低点、底用回落高点，仍是 `_reaction_neck`（离两端各 ≥1 根） |
+| 形态够长 | `idx3 − idx1 + 1 ≥ min_form_bars`，且 ≤ `max_span_bars`(110) | 规格的 `MIN_FORM_CANDLE=10` 是全局值，短周期 10 根只十几分钟，工厂按 `max(10, 该周期 min_span)` 取下限 |
+| 三段均量递减 | 顶 `V2 ≤ V1` 且 `V3 < V2`；底把 `<`/`≤` 对调 | 段起点 = P1 之前最近一个反向拐点（不超一个形态长）；均量前先剔 `> 3×` 段均的单根天量（规格 `PULSE_MULTIPLE=3`，**本通道默认开**；头肩那侧的 `strict_pulse_filter` 仍是默认关，现口径不动） |
+| 形态高度三件套 | `height ≥ 10` 价点、`height ÷ 峰值 ≥ 0.008`、三个极值逐个离颈线 `≥ 0.2 × height` | 用户裁决④=复用头肩同款三件套。拦横盘箱体靠前两条（箱体高度趋 0，价点闸和比例闸先拒）；0.2×height 那条拦的是"名义等高但其中一个顶其实贴着颈线"（自检 6c 单独坐实） |
+
+**软标记**：`TimeDev = abs(T1−T2) ÷ max(T1,T2)`（T1=P1→P2、T2=P2→P3 的根数），`TIME_DEV_THRESHOLD=0.5` 只写进 reason（「时间对称 / 时间不对称」）和 `detail.time_dev`，**不拦信号、不改手数**（`ENABLE_TIME_SYM_FILTER=False` → `time_filter=False`）；要当闸用得显式传 `time_filter=True`。
+
+**触发与去重**：P3 必须是当前这根已收盘 K 线（`main_pivots[-1][0] == last_idx`），不延后、不补推旧形态——11-17 那条铁律同样管这条通道。多组候选按 `(spread, TimeDev, −idx1)` 取最小：最等高 → 腿最均衡 → 结构最长。`pattern_id = triple-{top|bottom}:P1时刻:P2时刻:P3时刻`，另记 `triple-{kind}-p2:P2时刻`；与头肩的 `top:` / `bottom:` 命名空间不撞，两条通道同一根各发各的。
+
+**资金口径**（裁决①②）：**当根收盘即告警并开模拟盘单**，不是规格的「下一根开盘」——那会把发现时点整体后移一根，跟 11-13 起的全套口径打架。止盈止损**仍用 ±0.8 / ∓0.2 × 形态高度**，形态高度 = `abs(最高顶 − 颈线)`（进 `detail.swing`，所以 `replay_winrate.simulate_outcomes` 与手动开仓原样能用）。规格的 `max(P1,P2,P3)+1tick` 结构止损**没采用**：它把盈亏比拉到约 1:2.3，20% 平衡线（`0.2/(0.8+0.2)`）当场失去意义，要换得连资金规则一起重拍。量度目标 `颈线 ∓ height` 只进 reason/detail 作参考，**不参与判断、不参与止盈止损**。规格的「形态失效」也没做成平仓条件：出场仍只有止盈、形态止损、浮亏 1000 三条既有闸，告警一旦注册就不回滚（与头肩同）。
+
+**发射顺序**：串行 `evaluate_df` 走 `tier_dets(严格, 常规) + [三重]`（`core/hs_monitor.py:547`）；分片走 `KeyResult.det_triple`（`core/hs_fanout.py:42`、`:86`），抢跑那半截 K 不喂三重；父进程在 `core/db_monitor.py:256` 把它追加到头肩之后。日志标签 `三重告警`（`alert_tag`，`core/hs_monitor.py:305`）。三重不带 `extra.strict`，所以只出现在 App「告警」页，不进「严格」页；`chart.png` 对三重画 `P1/P2/P3`（底画 `L1/L2/L3`）、标题 `TRIPLE TOP/BOTTOM`（`core/hs_chart.py:96`）；看板形态名取 `detail.pattern_kind`（`core/paper_trade.py:363`），不会再标成头肩。
+
+**为什么头肩补不了这个洞**：`_shape_ok` 要求两肩各离头 `≥ 0.2 × height`，纯等高三重的"头"比"肩"只高 0 点 → 一律被拒（自检第 10 项直接坐实）。所以这条是**新增覆盖面**，不是重复告警；反过来中间那个顶高出 100 点（≥0.2×height）时两条通道会同根都响，各出一条（第 10b 项，`pattern_id` 不冲突）。
+
+**自检与已测数据**：`_triple_selftest.py`（假 K 线 112 项，不连库）覆盖当根出信号、同根不重复、旧形态不补推、四条硬闸各自单独拒一次、量能方向顶底相反、脉冲剔除开/关的差别、TimeDev 软硬两口径、与头肩的洞与撞车、工厂逐周期继承跨度表且不挂严格档、引擎水位表独立（`_last_triple_dt`）、`HS_TRIPLE_SIGNALS=0` 整条静默、`detect_one` 带回 `det_triple` 而抢跑键不带、图表标题与标号。本机轻量回放（2 品种 × {30m,1h} × 30 天）只出 1 条三重底（`KQ.m@CZCE.PF` 11-02 21:30，120 根内先触止损），1h 那两键因根数不足 121 被点名跳过——**全市场条数与胜率还没跑**，命令见 §3。
+
+**CPU 代价（本机微基准，随机游走 400 根滑窗、每根重扫一次）**：1m 头肩 9.27 ms + 三重 1.48 ms、5m 13.34 + 1.39、30m 29.98 + 1.50 → 这条通道只加 **5%~16%**，不是严格档那种"策略侧翻倍"。原因：三重的 `Dev(P2,P1)` / `Dev(P3,P1)` 在候选循环最外层就 `continue` 掉绝大多数组合，而头肩的开销在 `_best_break` 那三层 `li/hi/ri` 循环加 strict 主导性判定。
+
 ### 告警页手动开仓（2026-11-18）
 
 App 每条告警展开后有一块「手动开仓（模拟盘）」：价位自己填、**手数自己填**（1~8，初值 1），**买入 = long / 卖出 = short**。它是**模拟盘**单，不是真盘下单——本仓库没有任何实盘下单通道。
@@ -174,6 +202,16 @@ docker run -d --rm --name strict_tier --env-file .env -v $PWD/reports:/app/repor
 - 对照：加 `-e HS_STRICT_SIGNALS=0` 重跑一次，严格档那几列应全 0、常规档列不动——这是验证开关真的管用。
 - 本机只做轻量自检（≤3 品种 × ≤2 周期）；全市场 130 品种一律上服务器，2 机并行时 `--workers` 别超 2。
 
+三重顶/底计数与胜率（`scripts/replay_triple.py`：同一段历史逐根滚动，三重与常规档头肩各跑一遍，输出每周期「三重 N 条（撞头肩同根 M）」+ 胜率行 + 每周期最近几条样例）。`--days` 短了会整片 0，根数不足一样点名：
+
+```bash
+docker run -d --rm --name triple_tier --env-file .env -v $PWD/reports:/app/reports -v $PWD/data:/app/data futures-quant-api sh -c "python -u scripts/replay_triple.py --days 60 --workers 2 >> /app/reports/triple_tier.log 2>&1"
+```
+
+- `撞头肩同根` = 那笔形态头肩本来也报（两条通道同刻各发一条，模拟盘只有一个坑，先到的头肩拿到开仓权）；没撞上的才是净新增覆盖面，判断"要不要留这条"就盯这个数。
+- 对照：`-e HS_TRIPLE_SIGNALS=0` 只关掉生产侧发射，**回测脚本不读这个开关**（`make_triple_strategy` 直接建实例），要出对照就 `--tfs` 逐周期比，或改跑 `replay_strict_tier.py` 的常规档列。
+- `--symbols` 限定品种、`--tfs` 限定周期；300 天窗口（2h/1d）单独一趟，别和 60 天混在同一个 `--days` 里读。
+
 规则 A/B（`scripts/ab_hs_rules.py`，OLD 用类方法补丁还原旧口径）：`HS_AB_SHARD=k/n`、`HS_AB_TFS`、`HS_AB_SYMBOLS`、`HS_AB_OUT`、`HS_AB_DUMP=1`。命令一律**写成单行**，反斜杠续行粘进终端会被截断成 `-bash: ocker: command not found`。
 
 ```bash
@@ -197,6 +235,7 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
   `docker compose up -d --build futures-api futures-ingest futures-monitor`
   服务名显式列全、**绝不带 `futures-backtest`**（一次性回测任务，裸 `up` 会把它点起来打满 CPU）。
 - 手动开仓（§1）只需要 `futures-api`（接口与 `manual_open`）和 `futures-monitor`（同步接手这笔）两个镜像新；`paper_trade.price_tick` 那列由 `ensure_schema` 在第一次调用时自己 `ALTER`，**不用手工 DDL**。核一下：`docker compose exec futures-api grep -c "def manual_open" /app/core/paper_trade.py` 期望 `1`。
+- 三重通道（§1）落在 `futures-monitor`（检测、发射、模拟盘）和 `futures-api`（`chart.png` 画 P1/P2/P3）两个镜像里，`docker compose up -d --build futures-api futures-monitor` 就够，ingest 不涉及。上线后核两件事：`docker compose exec futures-monitor grep -c "def detect_triple" /app/core/hs_monitor.py` 期望 `1`；日志里应出现 `[monitor] 三重告警 …` 这种行（没有不代表坏，代表还没遇到形态）。
 - 验证真进容器：`docker compose exec futures-monitor grep -c <新函数名> /app/core/paper_trade.py`（`grep -c` 数匹配行数，只出现一次时期望值就是 `1`）。
 - `docker compose logs futures-monitor`（和 ingest）**永远是空的，不是故障**——stdout 被重定向进 `reports/*.log`，用 `tail -n 40 reports/monitor.log`。
 - 分片并发数走 `HS_WORKERS`（`.env` 或 compose `environment:`），改这个**只需 `docker compose up -d futures-monitor` 重建容器，不用 `--build`**；设成 1 等于关掉分片。生产是 4 核、ingest 常态吃掉 1 核，3 是当前的折中。
@@ -208,6 +247,7 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 
 ## 5. 未闭环
 
+- **三重顶/底（§1 新通道）三件事没做**：①全市场条数、撞头肩同根率、逐周期胜率还没跑（命令在 §3，老机 2 核两片，别在生产机工作时段跑）；②生产镜像还没部署（§4 那条 `--build futures-api futures-monitor`）；③App 头部副标题已改成「头肩 / 三重形态 · 实时通知」，但 RN 的 JS 打进 APK，**这行文案要下次出包才生效**——不影响功能（三重告警本身是数据驱动，旧包照收照显示）。
 - 台账里的待决策：#10 左肩≈颈线是否另加闸；#12/#13 是否单跑「仅 earliest-R」；5m 单周期细化（sym/conf 两轮里 5m 都是唯一改善的周期，但合计仍为负）。
 - **合计仍贴着 20% 平衡线**（最近一轮 20.8%/+0.008），5m 与 1d 是稳定拖累——见台账 32 条。
 - 数据修复：11-06～11-10 的 30m/1h/2h/3h/4h 会话周期回填

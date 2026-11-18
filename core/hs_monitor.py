@@ -27,6 +27,7 @@ from core.kline_store import (
 )
 from core.push_notify import send_alert_push
 from strategies.head_shoulders import HeadShouldersStrategy
+from strategies.triple_pattern import TriplePatternStrategy
 from utils.symbols import get_display_name
 
 # 监控周期：1分 / 5分 / 30分 / 1小时 / 2小时 / 日线
@@ -50,6 +51,9 @@ PROVISIONAL_WINDOWS: tuple[tuple[time, time], ...] = (
 # 严格档：与常规档同刻触发，多两肩价差 Dev + 形态根数 + 三段均量递减三道闸，优先级最高
 # （同形态时只出严格档那条）。HS_STRICT_SIGNALS=0 可整体关掉。
 STRICT_SIGNALS = os.environ.get("HS_STRICT_SIGNALS", "1") != "0"
+
+# 三重顶/底：独立第三通道，与头肩两条各自记账、同刻同根都发（HS_TRIPLE_SIGNALS=0 可整体关掉）。
+TRIPLE_SIGNALS = os.environ.get("HS_TRIPLE_SIGNALS", "1") != "0"
 
 
 def in_provisional_window(now: datetime) -> bool:
@@ -92,6 +96,31 @@ def make_strategy(duration_sec: int) -> HeadShouldersStrategy:
         max_volume=1,
         duration_sec=duration_sec,
         strict_signals=STRICT_SIGNALS,
+    )
+
+
+def make_triple_strategy(duration_sec: int) -> TriplePatternStrategy:
+    """三重顶/底：拐点、跨度、形态高度三件套都取头肩同一张表，避免两套判据。
+
+    规格里的 `MIN_FORM_CANDLE=10` 是全局值，但短周期 10 根只是十几分钟，
+    所以按下限取 `max(10, 该周期 min_span_bars)`。
+    量能闸按规格先剔脉冲巨量（`PULSE_MULTIPLE=3`）再求段均量：一根天量会把整段
+    均值顶上去，把「第三段确实在缩量」误判成放量。头肩那套脉冲闸仍只归严格档，不动。
+    """
+    cfg = TF_CONFIGS.get(duration_sec, TF_CONFIGS[DURATION_30M])
+    return TriplePatternStrategy(
+        pivot_order=cfg.pivot_order,
+        min_span_bars=cfg.min_span_bars,
+        max_span_bars=cfg.max_span_bars,
+        min_head_neck_ratio=0.008,
+        max_volume=1,
+        duration_sec=duration_sec,
+        dev_threshold=0.025,
+        min_form_bars=max(10, cfg.min_span_bars),
+        time_dev_threshold=0.5,
+        time_filter=False,
+        strict_pulse_filter=True,
+        strict_pulse_multiple=3.0,
     )
 
 
@@ -273,12 +302,23 @@ def tier_dets(strict: Detection | None, normal: Detection | None) -> list[Detect
     return [d for d in (strict, normal) if d is not None]
 
 
+def alert_tag(det: Detection) -> str:
+    """日志前缀：让严格档、三重通道和普通头肩在监控输出里一眼分开。"""
+    if det.strict:
+        return "严格告警"
+    if det.kind.startswith("三重"):
+        return "三重告警"
+    return "告警"
+
+
 class HsMonitorEngine:
     """持久化策略实例，按 symbol+周期在新 K 线出现时检测一次。"""
 
     def __init__(self) -> None:
         self._strategies: dict[str, HeadShouldersStrategy] = {}
+        self._triple_strategies: dict[str, TriplePatternStrategy] = {}
         self._last_bar_dt: dict[str, datetime] = {}
+        self._last_triple_dt: dict[str, datetime] = {}
         self._alerted: set[str] = set()
         self.on_signal: Callable[[str, int, datetime, pd.DataFrame, Any], None] | None = None
 
@@ -290,6 +330,12 @@ class HsMonitorEngine:
         if key not in self._strategies:
             self._strategies[key] = make_strategy(duration_sec)
         return self._strategies[key]
+
+    def _triple_strategy(self, symbol: str, duration_sec: int) -> TriplePatternStrategy:
+        key = self._key(symbol, duration_sec)
+        if key not in self._triple_strategies:
+            self._triple_strategies[key] = make_triple_strategy(duration_sec)
+        return self._triple_strategies[key]
 
     def check_symbol_tf(
         self,
@@ -387,6 +433,45 @@ class HsMonitorEngine:
             strict=True,
         )
 
+    def detect_triple(
+        self,
+        symbol: str,
+        duration_sec: int,
+        df: pd.DataFrame,
+        *,
+        force: bool = False,
+    ) -> Detection | None:
+        """三重顶/底：第三个极值当根触发，与头肩共用同一套点位与拐点口径。
+
+        常规档用 `_last_bar_dt` 记过这根之后还要能被这里记一次，
+        所以另开一张 `_last_triple_dt`，否则三重永远抢不到新 K 线。
+        """
+        if df is None or df.empty or not TRIPLE_SIGNALS:
+            return None
+
+        key = self._key(symbol, duration_sec)
+        last_dt = self._last_dt(df)
+        prev = self._last_triple_dt.get(key)
+        if not force and prev is not None and prev == last_dt:
+            return None
+
+        strategy = self._triple_strategy(symbol, duration_sec)
+        signal = strategy.on_bar(df, max_volume=1, symbol=key)
+        self._last_triple_dt[key] = last_dt
+        if signal is None:
+            return None
+
+        detail = getattr(signal, "detail", None) or {}
+        kind = str(detail.get("pattern_kind") or ("三重底" if signal.action == "buy" else "三重顶"))
+        return Detection(
+            symbol=symbol,
+            duration_sec=duration_sec,
+            last_dt=last_dt,
+            kind=kind,
+            signal=signal,
+            df=df,
+        )
+
     @staticmethod
     def _last_dt(df: pd.DataFrame) -> datetime:
         last_dt = pd.Timestamp(df.iloc[-1]["datetime"]).to_pydatetime()
@@ -452,12 +537,17 @@ class HsMonitorEngine:
         force: bool = False,
         emit: bool = True,
     ) -> int:
-        """串行路径：用给定的已收盘 K 线做一次检测并按需告警，严格档先于常规档。"""
+        """串行路径：用给定的已收盘 K 线做一次检测并按需告警，严格档先于常规档。
+
+        三重是第三条独立通道，排在最后：同一根上头肩与三重都成立时两条都发，
+        但模拟盘 (品种,周期) 只有一个坑，先到的头肩拿到开仓权。
+        """
         strict = self.detect_strict(symbol, duration_sec, df)
         det = self.detect(symbol, duration_sec, df, force=force)
+        triple = self.detect_triple(symbol, duration_sec, df, force=force)
         if not emit:
             return 0
         n = 0
-        for item in tier_dets(strict, det):
+        for item in tier_dets(strict, det) + ([triple] if triple is not None else []):
             n += self.deliver(item, alert_log=alert_log, push=push, toast=toast)
         return n

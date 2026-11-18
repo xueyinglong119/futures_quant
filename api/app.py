@@ -509,7 +509,7 @@ def api_alert_execution(alert_id: str) -> dict[str, Any]:
 
 @app.get("/api/alerts/{alert_id}/chart.png")
 def api_alert_chart(alert_id: str) -> Response:
-    """告警的头肩形态 K 线图：蜡烛 + 左/头/右标记 + 颈线。"""
+    """告警的形态 K 线图：蜡烛 + 三个极值点标记 + 颈线（头肩=左/头/右，三重=顶1/顶2/顶3）。"""
     alert = next(
         (
             a

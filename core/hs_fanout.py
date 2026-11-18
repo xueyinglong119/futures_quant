@@ -39,6 +39,7 @@ class KeyResult:
     ms: float
     prov: bool = False
     det_strict: Detection | None = None
+    det_triple: Detection | None = None
 
 
 def shard_of(symbol: str, count: int) -> int:
@@ -73,7 +74,7 @@ def detect_one(
     """取数 + 算形态，不发告警。数据为空返回 None。
 
     严格档与常规档同刻出（右肩当根），同形态时由 `tier_dets` 只留优先级高的严格档那条；
-    抢跑那半截 K 只做提醒，不进严格档。
+    抢跑那半截 K 只做提醒，不进严格档。三重顶底同理，也是收线才发，抢跑那半截不算。
     """
     t0 = time.perf_counter()
     df = load_tf_df(symbol, duration_sec, conn=conn)
@@ -82,6 +83,7 @@ def detect_one(
     last_dt, bar = last_bar_of(df)
     det_strict = None if prov else engine.detect_strict(symbol, duration_sec, df)
     det = engine.detect(symbol, duration_sec, df, force=force)
+    det_triple = None if prov else engine.detect_triple(symbol, duration_sec, df)
     return KeyResult(
         symbol=symbol,
         duration_sec=duration_sec,
@@ -91,6 +93,7 @@ def detect_one(
         ms=(time.perf_counter() - t0) * 1000.0,
         prov=prov,
         det_strict=det_strict,
+        det_triple=det_triple,
     )
 
 

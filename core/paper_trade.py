@@ -358,7 +358,10 @@ class PaperBroker:
         if entry <= 0:
             return
         strict = bool(detail.get("strict"))
-        kind = "头肩顶" if side == "short" else "头肩底"
+        # 三重通道复用同一条开仓路径，看板上的形态名要跟告警一致
+        kind = str(
+            detail.get("pattern_kind") or ("头肩顶" if side == "short" else "头肩底")
+        )
         if strict:
             kind = f"{kind}·严格"
         reason = str(getattr(signal, "reason", "") or "")

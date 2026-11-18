@@ -92,10 +92,13 @@ def render_hs_chart(
         )
 
     side = str(detail.get("side") or "")
+    # 三重的三个点是近似等高的顶/底，标号跟着规格的命名走，别写成肩头肩
+    triple = str(detail.get("pattern_kind") or "").startswith("三重")
+    labels = ("L1", "L2", "L3") if triple and side != "short" else ("P1", "P2", "P3")
     for key, label, above in (
-        ("left", "L", side != "short"),
-        ("head", "H", side != "short"),
-        ("right", "R", side != "short"),
+        ("left", labels[0] if triple else "L", side != "short"),
+        ("head", labels[1] if triple else "H", side != "short"),
+        ("right", labels[2] if triple else "R", side != "short"),
     ):
         t = _parse_detail_time(detail.get(f"{key}_time"), ref)
         price = detail.get(key)
@@ -135,7 +138,10 @@ def render_hs_chart(
     for edge in ax.spines.values():
         edge.set_color("#24384A")
     title = f"{symbol} {DURATION_LABELS.get(duration_sec, duration_sec)} "
-    title += "H&S TOP" if side == "short" else "H&S BOTTOM"
+    if triple:
+        title += "TRIPLE TOP" if side == "short" else "TRIPLE BOTTOM"
+    else:
+        title += "H&S TOP" if side == "short" else "H&S BOTTOM"
     ax.set_title(title, fontsize=10, color="#D7E0E8")
     ax.set_xlim(-1, n)
 
