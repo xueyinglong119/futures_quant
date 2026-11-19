@@ -126,7 +126,9 @@
 | 菜籽 RS | 3727 手 | 9144 |
 | 原木 lg | 3950 手 | 12170 |
 
-那五个零成交的品种 K 线照走、水位照前进，但**没有对手盘**，画出来的形态纯是噪声——而它们每个周期都白占一个检测键。库里商品主连 **87 → 76 个**（−12.6%）。
+那五个零成交的品种 K 线照走、水位照前进，但**没有对手盘**，画出来的形态纯是噪声——而它们每个周期都白占一个检测键。
+
+**两个口径别混**（11-19 部署实测）：线上实时名单是 TqSdk 当下返回的商品主连，ingest 启动行 `81 → 70`（序列数 `243 → 210` = 70×3，正好减 11）；本地自检按「库里有 ≥20 根 1d 数据的品种」算是 `87 → 76`。两者差 6 个是**库里有历史、但天勤现在不再返回主连**的品种——它们本来就不在采集与检测范围里，所以看日志核数一律按 **70** 这个口径。
 
 **为什么是硬编码产品码而不是每日按量动态重算**：这批不会突然变活跃（动力煤那类是政策性停牌，不是量小），硬名单可复核、不引入新数据源，也不会某天因为一次缩量把活跃品种踢出去。代价是新增的低流动性品种不会自动被剔。**`db_monitor._symbols` 那条「TqApi 查不到就退回 `list_symbols(conn)`」的兜底路径也套了 `drop_illiquid`**，否则一降级就把这 11 个捞回来。
 
@@ -286,7 +288,7 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
   服务名显式列全、**绝不带 `futures-backtest`**（一次性回测任务，裸 `up` 会把它点起来打满 CPU）。
 - 手动开仓（§1）只需要 `futures-api`（接口与 `manual_open`）和 `futures-monitor`（同步接手这笔）两个镜像新；`paper_trade.price_tick` 那列由 `ensure_schema` 在第一次调用时自己 `ALTER`，**不用手工 DDL**。核一下：`docker compose exec futures-api grep -c "def manual_open" /app/core/paper_trade.py` 期望 `1`。
 - 三重通道（§1）落在 `futures-monitor`（检测、发射、模拟盘）和 `futures-api`（`chart.png` 画 P1/P2/P3）两个镜像里，`docker compose up -d --build futures-api futures-monitor` 就够，ingest 不涉及。上线后核两件事：`docker compose exec futures-monitor grep -c "def detect_triple" /app/core/hs_monitor.py` 期望 `1`；日志里应出现 `[monitor] 三重告警 …` 这种行（没有不代表坏，代表还没遇到形态）。
-- **改品种名单（§1 监控品种范围）必须重建 `futures-ingest`**，不只是 monitor：`list_commodity_mains` 同时喂采集（`core/realtime_pipeline.py:304`）和检测（`core/db_monitor.py:131`），api 侧没调用。所以 11-19 这次要 `docker compose up -d --build futures-api futures-ingest futures-monitor`（把之前"ingest 不涉及"那句忘掉，那是三重通道那次的情况）。核两件事：`docker compose exec futures-monitor grep -c "ILLIQUID_PRODUCTS" /app/core/cont_symbols.py` 期望 `2`（定义 + 过滤各一行）；启动后 `grep 品种 reports/ingest.log | tail -3` 看订阅数量，应从 87 掉到 **76**（掉 11 个才对，没掉就是镜像没新）。**别在交易时段重启 ingest**——重启窗口里的 1m 根会缺，得回头补历史。
+- **改品种名单（§1 监控品种范围）必须重建 `futures-ingest`**，不只是 monitor：`list_commodity_mains` 同时喂采集（`core/realtime_pipeline.py:304`）和检测（`core/db_monitor.py:131`），api 侧没调用。所以 11-19 这次要 `docker compose up -d --build futures-api futures-ingest futures-monitor`（把之前"ingest 不涉及"那句忘掉，那是三重通道那次的情况）。核两件事：`docker compose exec futures-monitor grep -c "ILLIQUID_PRODUCTS" /app/core/cont_symbols.py` 期望 `2`（定义 + 过滤各一行）；启动后 `grep 品种 reports/ingest.log | tail -3` 看订阅数量，应从 `81` 掉到 **`70`**（掉 11 个才对，没掉就是镜像没新；**11-19 部署实测就是这样**，最后一行 `[pipeline] 品种 70，先订 1m,5m,1d （210 序列）`）。**别在交易时段重启 ingest**——重启窗口里的 1m 根会缺，得回头补历史。
 - 飞书推送（§1，**严格档 + 三重**）只在 `futures-monitor` 一个进程里发射，`docker compose up -d --build futures-api futures-monitor` 就带上了（api 侧没改动，带上是为了同批镜像）。**机器人地址要写进生产机的 `.env`**，改 `.env` 本身不需要 `--build`，但 `docker compose up -d futures-monitor` 得跑一次才会把新变量注入容器。核三件事：
   `docker compose exec futures-monitor grep -c "def send_alert_feishu" /app/core/feishu_notify.py` 期望 `1`；
   `docker compose exec futures-monitor grep -c "if strict or triple" /app/core/hs_monitor.py` 期望 `1`（`1` = 三重已进飞书；回 `0` 说明镜像里还是 11-18 那版只推严格档）；
@@ -314,7 +316,7 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
   `docker compose run --rm --no-deps futures-ingest python -u scripts/rebuild_session_klines.py --all --start 2026-11-06 --end 2026-11-10`，确认输出无误再加 `--execute`；1d 的 11-06 另修。
 - **1d 又缺 11-14/11-15**（11-16 09:56 水位表 `dur=86400 max=2026-11-13 00:00`）。`rebuild_session_klines.py` 只合成 30m/1h/2h/3h/4h，不管 1d/5m；1d 用
   `docker compose run --rm --no-deps futures-ingest python -u scripts/repair_today_klines.py --day 2026-11-14 --durations 1d`（再 `--day 2026-11-15`）。该脚本**直接写库、无 dry-run**，且会再开一个 TqApi 会话占配额。
-- **5m 与 1d 只有 89 个品种有数据，1m 有 130**（同一张水位表）。差额应是「历史回填写过的品种」多于「实时订阅的品种」——用 `grep "品种" reports/ingest.log | tail -3` 核 `list_commodity_mains` 返回的数量；若确实只有 89，那这 41 个品种的 5m/1d **永远不出告警**，要覆盖得补历史或加订阅。⚠️ **11-19 起名单已剔 11 个低流动性品种（87 → 76，§1 监控品种范围）**，这条核查要按新名单重算，`89/130` 只能当历史基准；且要等 ingest 重建镜像后重启才会真的掉到 76。
+- **5m 与 1d 只有 89 个品种有数据，1m 有 130**（同一张水位表）。差额应是「历史回填写过的品种」多于「实时订阅的品种」。**11-19 实测（只读 SQL，`COUNT(DISTINCT symbol)`）已对上**：1m 130、30m 130、5m 89、1d 89（近 90 日 88、其中 ≥20 根 87），而 TqSdk 当下返回的商品主连只有 **81**，剔掉 11 个低流动性品种后实时订阅 **70**（§1 监控品种范围）⇒ **130−70=60 个品种不会再有新告警**，其中 `89−81=8` 个是「库里有 5m/1d 历史、但天勤已不返回主连」（多半是摘牌/换码），具体是哪 8 个要拿 `SELECT DISTINCT symbol FROM kline_bars WHERE duration_sec=86400` 与 ingest 启动时的名单求差集才定得下。要覆盖得补历史或加订阅。
 - ingest 常态就是 ≈ 单核打满（`docker stats` 5 次采样 90.8/95.9/100.0/99.7/100.0%，4 核约 25%；monitor 则是分钟边界脉冲，同一批采样 27.0/0.7/23.0/1.0/21.3%，api 0.06%）。主因已定位：`serial_to_rows` 用 `klines.iloc[i]["col"]` 逐行取标量，**60 行的 1m 序列一次实测 25.8 ms**；按单核打满反推 ≈ 每秒 35–39 次调用（每 0.25s 圈约 9 条序列被 `is_changing` 判为变化），数字自洽。降载两档：向量化取列（输出逐行一致，实测 5.5 ms，→ 约 20% 单核）、或只解析水位之后的行（调用方本就按 watermark 过滤，可 <1 ms，→ 个位数百分比，但要连带核 `correction`/半截K 判定）。**不改告警语义**，且 ingest 是 `enable_monitor=False` 不跑策略——所以告警口径怎么改都不影响它，别把 CPU 变化算成规则改动的功劳。
 - 开仓时点：一年基线和 30 天贴收盘（仅 2 条、竞价逆向选择）都**否定**了抢收盘跳空，规则未改。
 - **3 进程分片已上生产并验收通过（11-16 13:30 开盘）**：预热 261 键 `sum=12.64s` → 墙钟 `4.7s` = **2.69×**；13:30/13:35 的告警轮**一条 `本轮扫描` 都没打**（阈值 1s）⇒ 单轮全部 <1s，改造前这批键是秒级起步。告警口径不变（`右(...) 时刻 = K线时刻`）。资源：monitor MEM 153.8→**479.8 MiB（+326）**、PIDS 9→37、CPU 1.77%，**ingest 20.47% 未被抢**。剩下两档：①每键重取 500 根 → 按键缓存 frame + 增量取数；②新扫描行（每轮必打）要等下次 `--build` 部署才生效。
