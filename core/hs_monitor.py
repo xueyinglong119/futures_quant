@@ -204,6 +204,7 @@ def emit_alert(
     toast: bool = True,
     provisional: bool = False,
     strict: bool = False,
+    triple: bool = False,
 ) -> str | None:
     """写告警并推送，返回告警 id，供模拟账户把这笔单和告警对上。"""
     label = DURATION_LABELS.get(duration_sec, str(duration_sec))
@@ -266,8 +267,8 @@ def emit_alert(
                     print(f"App推送结果: {push_result}", flush=True)
                 except Exception as exc:  # noqa: BLE001
                     print(f"App推送失败: {exc}", flush=True)
-                if strict:
-                    # App 被系统杀掉就收不到轮询，严格档另走飞书（亮屏交给飞书自己的保活）
+                if strict or triple:
+                    # App 被系统杀掉就收不到轮询，严格档与三重另走飞书（亮屏交给飞书自己的保活）
                     try:
                         fs_result = send_alert_feishu(alert)
                         print(f"飞书推送结果: {fs_result}", flush=True)
@@ -291,6 +292,7 @@ class Detection:
     signal: Any
     df: pd.DataFrame
     strict: bool = False
+    triple: bool = False
 
 
 def _pattern_of(det: Detection) -> str:
@@ -314,7 +316,7 @@ def alert_tag(det: Detection) -> str:
     """日志前缀：让严格档、三重通道和普通头肩在监控输出里一眼分开。"""
     if det.strict:
         return "严格告警"
-    if det.kind.startswith("三重"):
+    if det.triple:
         return "三重告警"
     return "告警"
 
@@ -478,6 +480,7 @@ class HsMonitorEngine:
             kind=kind,
             signal=signal,
             df=df,
+            triple=True,
         )
 
     @staticmethod
@@ -518,6 +521,7 @@ class HsMonitorEngine:
             toast=toast,
             provisional=provisional,
             strict=det.strict,
+            triple=det.triple,
         )
         if self.on_signal is not None:
             try:

@@ -114,13 +114,15 @@
 
 **现象与根因**：App 只在活着的时候有通知——通知栏那条是 `mobile/App.tsx` 里 15 秒一轮的 `/api/alerts` 轮询 + 本地 `scheduleNotificationAsync` 发出来的，**不是远程推送**。进程被系统杀掉（国产 ROM 很积极）就没有轮询，也就没有通知。远程推送这条路一直是死的：`mobile/android/app/google-services.json` 不存在、gradle 也没挂 google-services 插件 → `getExpoPushTokenAsync` 每次必抛 → `/api/devices/register` 从没被调用 → `data/alerts.json` 的 `devices` 恒空 → 服务端 `send_alert_push` 恒回 `{"sent": 0, "detail": "no_devices"}`（`reports/monitor.log` 里每行 `App推送结果:` 都能看到）。App 里那句「通知已开启」是 `setupPush` 的 catch 分支在**掩盖**这个异常，已改成实话（「通知仅在 App 存活时推送，彻底关闭 App 后收不到」）。
 
-**为什么不接厂商通道**：小米/vivo/OPPO 的推送要求**企业开发者账号 + 应用已上架**（极光官方口径；华为个人账号可、魅族/FCM 个人可），而上架本身还要软著 + ICP + 工信部 APP 备案 + 隐私政策页，个人主体短期走不通。所以 11-18 用户裁决：**改走飞书群机器人 webhook**，亮屏、横幅、响铃交给飞书 App 自己的保活；推送范围**只发严格档**（`extra.strict`），常规档、抢跑、三重仍只进 App 列表。
+**为什么不接厂商通道**：小米/vivo/OPPO 的推送要求**企业开发者账号 + 应用已上架**（极光官方口径；华为个人账号可、魅族/FCM 个人可），而上架本身还要软著 + ICP + 工信部 APP 备案 + 隐私政策页，个人主体短期走不通。所以 11-18 用户裁决：**改走飞书群机器人 webhook**，亮屏、横幅、响铃交给飞书 App 自己的保活。
 
-**现口径**：代码 `core/feishu_notify.py`，接线在 `core/hs_monitor.py` 那个已有的 `_push` 后台线程里、`strict` 为真时追加一发，失败只打 `飞书推送结果/失败` 日志，不影响告警落库与模拟盘。飞书限流 100 次/分钟、5 次/秒，严格档这个量级用不到节流。签名按官方口径 `base64(HmacSHA256(key="{timestamp}\n{secret}", msg=b""))`——**key 和 msg 的位置与常规用法相反**，写反了服务端报字段校验失败，自检里专门钉了这条。
+**推送范围（11-19 扩过一次）**：11-18 首版**只发严格档**；11-19 用户加了一条「有三重形态的也上飞书」，现口径是 **严格档 + 三重顶/底**两路进飞书，常规档和抢跑仍只进 App 列表。判定用 `Detection` 上的两个显式标记（`strict` / `triple`），不是猜 kind 字符串——三重那条在 `detect_triple` 里打 `triple=True`，**不带** `·严格` 后缀也不写 `extra.strict`，所以 App 的「严格」标签页不会混进三重。⚠️ 三重的量级和严格档不是一个数量级：旧口径全市场 60 天三重 **8205 条**（1m 4841 / 5m 2718 / 30m 506 / 1h 140）对同期严格档 1227 条，新口径（1% 粗筛 +  textbook 图形闸）收紧后还没重跑（任务 #24）。限流本身打不到（100 次/分钟），**真上线后如果 1m/5m 的三重把群刷满**，收窄办法是给飞书加周期门槛（`emit_alert` 那个 `if strict or triple` 上 and 一个 `duration_sec >= 1800`），一行。
+
+**现口径**：代码 `core/feishu_notify.py`，接线在 `core/hs_monitor.py` 那个已有的 `_push` 后台线程里、`strict or triple` 为真时追加一发，失败只打 `飞书推送结果/失败` 日志，不影响告警落库与模拟盘。签名按官方口径 `base64(HmacSHA256(key="{timestamp}\n{secret}", msg=b""))`——**key 和 msg 的位置与常规用法相反**，写反了服务端报字段校验失败，自检里专门钉了这条。
 
 **配置**（全部 `.env`，缺 `FEISHU_WEBHOOK_URL` 整条静默跳过、回 `no_webhook`）：`FEISHU_WEBHOOK_URL` 机器人地址、`FEISHU_WEBHOOK_SECRET` 只在机器人开了「签名校验」时填、`HS_PUBLIC_BASE` 填手机能访问到的服务地址（如 `http://<公网IP>:8000`）就在卡片上加「看形态图」按钮指向 `/api/alerts/{id}/chart.png`、`HS_FEISHU_NOTIFY=0` 关掉。⚠️ 这几个值在**发送时**现读，不在 import 时读：本模块可能比 `config.settings` 的 `load_dotenv()` 更早被 import，模块级求值会把地址读成空、整条通道静默失效。
 
-**卡片**：红头标题「品种 周期 头肩底·严格」（kind 已带「·严格」，标题不重复），正文 = 加粗 reason + `K线 <bar_time>` + 有 `detail.measured`（只有三重通道带）时补「量度目标 X · 形态高度 Y」、否则只补「形态高度 Y」；底部 note 是 品种 · 周期 · `detail.pattern_kind`。自检 `_feishu_selftest.py` **20 项**（签名向量与四种写反/错分隔符、五种卡片排布、`disabled`/`no_webhook`/非 0 code/网络异常四个发送分支、以及 `emit_alert` 接线：常规档不碰飞书、严格档两路按序、`push=False` 全静默、Expo 抛异常飞书照发、飞书自己抛异常不冒到行情循环）。
+**卡片**：红头标题「品种 周期 头肩底·严格」（kind 已带「·严格」，标题不重复；三重则是「品种 周期 三重底」这种原 kind），正文 = 加粗 reason + `K线 <bar_time>` + 有 `detail.measured`（只有三重通道带）时补「量度目标 X · 形态高度 Y」、否则只补「形态高度 Y」；底部 note 是 品种 · 周期 · `detail.pattern_kind`。自检 `_feishu_selftest.py` **22 项**（签名向量与四种写反/错分隔符、五种卡片排布、`disabled`/`no_webhook`/非 0 code/网络异常四个发送分支、以及 `emit_alert` 接线：常规档不碰飞书、严格档两路按序、**三重两路按序**、**抢跑不进飞书**、`push=False` 全静默、Expo 抛异常飞书照发、飞书自己抛异常不冒到行情循环）。
 
 **送达后的手机侧边界（11-18 小米机实测）**：webhook 机器人发出去的是**普通群消息**，拿不到 full-screen intent，所以「亮屏」完全由系统全局开关（设置搜「亮屏」→「锁屏来通知时亮屏」，且**息屏显示 AOD 开着时通知只画在 AOD 小块里、不点亮整屏**）和该 App 通知渠道的三项权限（允许通知 / 锁屏通知 / 悬浮通知）决定。已实测到的一条坑：**MIUI 通知归组后只有第一条会亮屏**，连着发第二条不亮——划走旧通知再单发就亮（当时误判成"通道坏了"，别重复排查）。这条对真实使用有影响的场景是**同一批收线时刻多品种同时出严格档**（会话 K 线对齐，30m/1h 那几档会挤在同一分钟），此时只有第一条亮屏；要不要把一轮内的多条**聚合成一张卡片**再发（代价是推送要攒一个几秒的小窗口，落库与模拟盘不受影响）**待用户拍板**，现口径仍是一条一卡片。
 
@@ -260,12 +262,13 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
   服务名显式列全、**绝不带 `futures-backtest`**（一次性回测任务，裸 `up` 会把它点起来打满 CPU）。
 - 手动开仓（§1）只需要 `futures-api`（接口与 `manual_open`）和 `futures-monitor`（同步接手这笔）两个镜像新；`paper_trade.price_tick` 那列由 `ensure_schema` 在第一次调用时自己 `ALTER`，**不用手工 DDL**。核一下：`docker compose exec futures-api grep -c "def manual_open" /app/core/paper_trade.py` 期望 `1`。
 - 三重通道（§1）落在 `futures-monitor`（检测、发射、模拟盘）和 `futures-api`（`chart.png` 画 P1/P2/P3）两个镜像里，`docker compose up -d --build futures-api futures-monitor` 就够，ingest 不涉及。上线后核两件事：`docker compose exec futures-monitor grep -c "def detect_triple" /app/core/hs_monitor.py` 期望 `1`；日志里应出现 `[monitor] 三重告警 …` 这种行（没有不代表坏，代表还没遇到形态）。
-- 飞书严格档推送（§1）只在 `futures-monitor` 一个进程里发射，`docker compose up -d --build futures-api futures-monitor` 就带上了（api 侧没改动，带上是为了同批镜像）。**机器人地址要写进生产机的 `.env`**，改 `.env` 本身不需要 `--build`，但 `docker compose up -d futures-monitor` 得跑一次才会把新变量注入容器。核三件事：
+- 飞书推送（§1，**严格档 + 三重**）只在 `futures-monitor` 一个进程里发射，`docker compose up -d --build futures-api futures-monitor` 就带上了（api 侧没改动，带上是为了同批镜像）。**机器人地址要写进生产机的 `.env`**，改 `.env` 本身不需要 `--build`，但 `docker compose up -d futures-monitor` 得跑一次才会把新变量注入容器。核三件事：
   `docker compose exec futures-monitor grep -c "def send_alert_feishu" /app/core/feishu_notify.py` 期望 `1`；
+  `docker compose exec futures-monitor grep -c "if strict or triple" /app/core/hs_monitor.py` 期望 `1`（`1` = 三重已进飞书；回 `0` 说明镜像里还是 11-18 那版只推严格档）；
   `docker compose exec futures-monitor printenv FEISHU_WEBHOOK_URL` 应有值（只看有没有，别把值贴进聊天记录）；
   群里该收到卡片了就手动造一条（**会在群里发一条测试卡片**）：
   `docker compose exec futures-monitor python -c "from core.alert_store import Alert; from core.feishu_notify import send_alert_feishu; print(send_alert_feishu(Alert(id='t1', symbol='KQ.m@CZCE.PF', kind='头肩底·严格', reason='[短纤 · 30分钟] 推送链路自测', bar_time='2026-11-18T14:30:00', created_at='2026-11-18 14:30:01', extra={'name': '短纤', 'duration': '30分钟', 'strict': True, 'detail': {'swing': 17.0}})))"`
-  回 `{'sent': 1}` 即通（**11-18 已实测通过**：手机飞书收到卡片）；回 `no_webhook` = 变量没进容器；回 `{'sent': 0, 'code': 11232...}` 之类 = 地址对但被拒，最常见是机器人「安全设置」勾了**自定义关键词**而消息没命中——把关键词设成 `严格`（严格档 kind 必带「·严格」，标题正文都有），或勾了签名校验却没填 `FEISHU_WEBHOOK_SECRET`。之后真告警看 `grep 飞书 reports/monitor.log | tail`。
+  回 `{'sent': 1}` 即通（**11-18 已实测通过**：手机飞书收到卡片）；回 `no_webhook` = 变量没进容器；回 `{'sent': 0, 'code': 11232...}` 之类 = 地址对但被拒，最常见是机器人「安全设置」勾了**自定义关键词**而消息没命中——**11-19 起三重也上飞书，只勾 `严格` 这一个关键词会把三重卡片全拒掉**（三重 kind 是「三重顶/三重底」，整张卡没有「严格」二字）。所以：首选勾**签名校验**并把 `FEISHU_WEBHOOK_SECRET` 填进 `.env`；用自定义关键词的话必须加到两个（飞书是"命中任一即放行"），例如 `严格` + `三重`。另外注意手动自测那条用的是严格档文案，**它通不代表三重也通**，按上面这条核过关键词才算完。之后真告警看 `grep 飞书 reports/monitor.log | tail`。
 - 验证真进容器：`docker compose exec futures-monitor grep -c <新函数名> /app/core/paper_trade.py`（`grep -c` 数匹配行数，只出现一次时期望值就是 `1`）。
 - `docker compose logs futures-monitor`（和 ingest）**永远是空的，不是故障**——stdout 被重定向进 `reports/*.log`，用 `tail -n 40 reports/monitor.log`。
 - 分片并发数走 `HS_WORKERS`（`.env` 或 compose `environment:`），改这个**只需 `docker compose up -d futures-monitor` 重建容器，不用 `--build`**；设成 1 等于关掉分片。生产是 4 核、ingest 常态吃掉 1 核，3 是当前的折中。
@@ -277,7 +280,7 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 
 ## 5. 未闭环
 
-- **飞书严格档推送（§1）已上线并实测通过（11-18 收盘后）**：生产机 `.env` 四个变量已写、`--build` 已部署、§4 那条手动自测回 `{'sent': 1}` 且手机飞书收到卡片。还差两件：①**真告警那一跳没验过**——要等下一个交易日出现严格档，看 `grep 飞书 reports/monitor.log | tail` 有没有 `飞书推送结果: {'sent': 1}`；②`mobile/App.tsx` 的推送状态文案改了，但 RN 的 JS 打进 APK，**下次出包才生效**——不影响功能。另外两点是裁决带来的边界：Expo/FCM 那条远程推送通道保持"永久不通"（小米机要 FCM 本身也不可靠，台账 #46 记了理由，别再当 bug 排查）；常规档、抢跑、三重**仍然只有 App 活着时才有通知**，要全覆盖得重开一次范围裁决。
+- **飞书推送（§1）严格档已上线（11-18 实测 `{'sent': 1}` + 手机收到卡片）；11-19 把三重也加了进来，代码在 `main`，生产还没重部署**。下次 `--build` 一次带两件事：三重新口径（`17c1e4f` + `9a0fd8b`）和三重进飞书。部署后要做三件：①核 §4 那两条 `grep -c`（含新加的 `if strict or triple` 期望 `1`）；②**确认机器人安全设置不是只有 `严格` 一个关键词**，否则三重卡片全被拒（飞书拒收只打在 `飞书推送结果:` 那行日志里，手机上没有任何提示，容易以为"没出形态"）；③等第一条真三重，`grep -E "三重告警|飞书" reports/monitor.log | tail`。还差两件旧账：`mobile/App.tsx` 的推送状态文案要下次出 APK 才生效；Expo/FCM 那条远程推送通道保持"永久不通"（小米机要 FCM 本身也不可靠，台账 #46 记了理由，别再当 bug 排查）。**常规档与抢跑仍只有 App 活着时才有通知**，要全覆盖得重开一次范围裁决。
 - **三重顶/底（§1 新通道）三件事没做**：①全市场条数、撞头肩同根率、逐周期胜率还没跑（命令在 §3，老机 2 核两片，别在生产机工作时段跑）；②生产镜像还没部署（§4 那条 `--build futures-api futures-monitor`）；③App 头部副标题已改成「头肩 / 三重形态 · 实时通知」，但 RN 的 JS 打进 APK，**这行文案要下次出包才生效**——不影响功能（三重告警本身是数据驱动，旧包照收照显示）。
 - ~~**三重在 5m 上可能太密**~~：这条是旧口径（第三脚当根、价格 2.5% 等高、无突破、无相邻约束）测出来的 133 条，已作废——11-18 用户整页否决后按图例重写（台账 #47）。新口径条数会大幅下降，等生产上重跑 `/backtest/triple` 再看密度与胜率。
 - 台账里的待决策：#10 左肩≈颈线是否另加闸；#12/#13 是否单跑「仅 earliest-R」；5m 单周期细化（sym/conf 两轮里 5m 都是唯一改善的周期，但合计仍为负）。
