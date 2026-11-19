@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 from tqsdk import TqApi, TqAuth
 
 from config.settings import Settings, load_settings
-from core.cont_symbols import list_commodity_mains
+from core.cont_symbols import drop_illiquid, list_commodity_mains
 from core.hs_fanout import HsFanout, KeyResult, detect_one
 from core.hs_monitor import (
     HS_MONITOR_DURATIONS,
@@ -131,7 +131,7 @@ class DbHsMonitor:
             return list_commodity_mains(api)
         except Exception:
             traceback.print_exc()
-            return list_symbols(conn, duration_sec=60) or list_symbols(conn)
+            return drop_illiquid(list_symbols(conn, duration_sec=60) or list_symbols(conn))
 
     def _pending_keys(self, marks: dict) -> list[tuple[str, int, bool]]:
         """水位前进、且不是半截会话 K 的键；顺手记水位，保证每根只算一次。"""
