@@ -247,6 +247,7 @@ docker run -d --rm --name strict_tier --env-file .env -v $PWD/reports:/app/repor
 - 对照：加 `-e HS_STRICT_SIGNALS=0` 重跑一次，严格档那几列应全 0、常规档列不动——这是验证开关真的管用。
 - 本机只做轻量自检（≤3 品种 × ≤2 周期）；全市场 130 品种一律上服务器，2 机并行时 `--workers` 别超 2。
 - **这两个脚本现在都出画廊**（11-18 加）：严格档落 `reports/backtest_strict/` → `/backtest/strict`，三重落 `reports/backtest_triple/` → `/backtest/triple`。卡片标题带归属（`[严格档独占]` / `[同形态让位]`、`[三重独占]` / `[同根有头肩]`），要判断这两条通道值不值得留，看独占那批画出来是什么东西，光看计数看不出。渲染统一在主进程做（不是 worker），因为要按时间全局截断：`--gallery-max` 默认 800 张（base64 单文件约 30MB，再多浏览器打不开），超了只丢最早的并在副标题点名；`--no-gallery` 退回纯数字。画图逻辑与 `run_backtest.py` 共用 `build_hits_gallery.render_hits`，别再各抄一份。
+  ⚠️ **画廊目录是硬编码的，`replay_triple.py` 和 `replay_strict_tier.py` 都没有 `--outdir`**（参数只有 `--days/--symbols/--tfs/--workers/--samples/--gallery-max/--no-gallery`），而且每次跑先 `shutil.rmtree` 那个目录 ⇒ **同一个脚本的两趟（如 `triple_tier` 60 天全周期 与 `triple_long` 300 天 2h/1d）画廊必然互相覆盖，后跑的删掉先跑的**。只有数字能并存（log 是 `>>` 追加）。所以：要么先把短窗那趟看完再跑长窗，要么跑完立刻 `cp reports/backtest_triple/gallery_single.html reports/triple_60d_gallery.html` 留档（留的那份路由不认，只能自己开文件）。
 
 三重顶/底计数与胜率（`scripts/replay_triple.py`：同一段历史逐根滚动，三重与常规档头肩各跑一遍，输出每周期「三重 N 条（撞头肩同根 M）」+ 胜率行 + 每周期最近几条样例）。`--days` 短了会整片 0，根数不足一样点名：
 
