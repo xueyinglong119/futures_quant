@@ -43,6 +43,20 @@ const list = document.getElementById("list");
 const openSet = new Set();
 const detailCache = new Map();
 
+// 与 App 三页同参：?provisional=1 抢跑、?strict=1 严格、&duration=30m、&unread_only=1
+const FILTER_KEYS = ["provisional", "strict", "duration", "unread_only"];
+const params = new URLSearchParams(location.search);
+const query = new URLSearchParams();
+for (const key of FILTER_KEYS) {
+  const v = params.get(key);
+  if (v) query.set(key, v);
+}
+const modeLabel = params.get("provisional") === "1" ? "抢跑"
+  : params.get("strict") === "1" ? "严格" : "";
+if (modeLabel) {
+  document.querySelector("header .sub").textContent = `${modeLabel}档 · 形态K线图 · 执行详情`;
+}
+
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
 ));
@@ -50,7 +64,8 @@ const money = (v) => (v === null || v === undefined ? "—" : Number(v).toFixed(
 const pnlCls = (v) => (v === null || v === undefined || v === 0 ? "" : (v > 0 ? "up" : "down"));
 
 async function load() {
-  const resp = await fetch("/api/alerts?limit=100");
+  const qs = query.toString();
+  const resp = await fetch(`/api/alerts?limit=100${qs ? "&" + qs : ""}`);
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   const body = await resp.json();
   const items = body.items || body.alerts || [];
