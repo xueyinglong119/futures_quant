@@ -242,8 +242,8 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         口径2 三个极值当根单量，同上。
         口径3 三个极值当根单量逐次排（顶 V1>V2>V3、底 V1<V2<V3），
         且三个极值当根的 MACD 柱逐次下降。
-        注意口径3 的量是口径2 的子集（逐次排必然第三根最小），所以它只能和口径2
-        一起放行；要让它单独起作用得把量那半句摘掉，改成纯动能支。
+        口径3 的量条件蕴含口径2（逐次排必然第三根最小），这是用户 11-20 明确要
+        保留的原样规格，别当冗余删掉。
         """
         at_bar = tuple(float(vols[b]) for _, b in legs)
         means = self._same_dir_means(vols, klines, legs, bottom=bottom)
