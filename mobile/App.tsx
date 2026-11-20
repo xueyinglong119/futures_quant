@@ -873,7 +873,10 @@ function BoardPane({
             ) : null}
             <Text style={styles.alertReason}>
               手续费 {Number(item.fee_open || 0).toFixed(2)}　
-              {open ? `浮动 ${moneyText(item.unrealized ?? null)}` : `净盈亏 ${moneyText(item.net_pnl)}`}
+              {open ? "浮动 " : "净盈亏 "}
+              <Text style={{ color: pnlColor(open ? item.unrealized : item.net_pnl) }}>
+                {moneyText(open ? item.unrealized ?? null : item.net_pnl)}
+              </Text>
             </Text>
             {open ? (
               <Pressable style={styles.closeBtn} onPress={() => closeTrade(item)}>
