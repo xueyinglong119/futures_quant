@@ -125,8 +125,12 @@ def list_alerts(
             if bool((a.get("extra") or {}).get("provisional")) == provisional
         ]
     if strict is not None:
+        # 严格页只列已收线的严格档：抢跑那半截 K 上的严格档归「抢跑」页（11-20）
         alerts = [
-            a for a in alerts if bool((a.get("extra") or {}).get("strict")) == strict
+            a
+            for a in alerts
+            if bool((a.get("extra") or {}).get("strict")) == strict
+            and not (strict and bool((a.get("extra") or {}).get("provisional")))
         ]
     if unread_only:
         alerts = [a for a in alerts if not a.get("read")]

@@ -282,20 +282,30 @@ class DbHsMonitor:
         return alerts
 
     def _deliver_provisional(self, res: KeyResult) -> int:
-        """抢跑告警：只落盘推送，不喂模拟盘 —— 那根 K 还没收线，价格随时会走样。"""
-        if res.det is None:
-            return 0
-        n = self.prov_engine.deliver(
-            res.det,
-            alert_log=self.alert_log,
-            push=True,
-            toast=False,
-            provisional=True,
-        )
-        if n:
-            label = DURATION_LABELS.get(res.duration_sec, str(res.duration_sec))
-            print(
-                f"[monitor] 抢跑告警 {res.symbol} {label} @ {res.last_dt:%Y-%m-%d %H:%M}",
-                flush=True,
+        """抢跑告警：只落盘推送，不喂模拟盘 —— 那根 K 还没收线，价格随时会走样。
+
+        严格档与三重照正式路径的顺序发（11-20 用户裁决：这两个通道也要提前提醒）：
+        同形态时 `tier_dets` 只留严格档，三重独立追加；三条都只用抢跑引擎，不与
+        正式路径共用 `_traded_patterns`。
+        """
+        dets = tier_dets(res.det_strict, res.det)
+        if res.det_triple is not None:
+            dets.append(res.det_triple)
+        n = 0
+        for det in dets:
+            got = self.prov_engine.deliver(
+                det,
+                alert_log=self.alert_log,
+                push=True,
+                toast=False,
+                provisional=True,
             )
+            if got:
+                label = DURATION_LABELS.get(res.duration_sec, str(res.duration_sec))
+                print(
+                    f"[monitor] 抢跑告警 {alert_tag(det)} {res.symbol} {label} "
+                    f"@ {res.last_dt:%Y-%m-%d %H:%M}",
+                    flush=True,
+                )
+            n += got
         return n

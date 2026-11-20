@@ -73,17 +73,18 @@ def detect_one(
 ) -> KeyResult | None:
     """取数 + 算形态，不发告警。数据为空返回 None。
 
-    严格档与常规档同刻出（右肩当根），同形态时由 `tier_dets` 只留优先级高的严格档那条；
-    抢跑那半截 K 只做提醒，不进严格档。三重顶底同理，也是收线才发，抢跑那半截不算。
+    严格档与常规档同刻出（右肩当根），同形态时由 `tier_dets` 只留优先级高的严格档那条。
+    抢跑那半截 K 三个通道都算（11-20 用户裁决：严格档、三重也要提前提醒），只是走独立
+    引擎、只提醒不开仓；收线那根仍由正式路径另发一条。
     """
     t0 = time.perf_counter()
     df = load_tf_df(symbol, duration_sec, conn=conn)
     if df is None or df.empty:
         return None
     last_dt, bar = last_bar_of(df)
-    det_strict = None if prov else engine.detect_strict(symbol, duration_sec, df)
+    det_strict = engine.detect_strict(symbol, duration_sec, df)
     det = engine.detect(symbol, duration_sec, df, force=force)
-    det_triple = None if prov else engine.detect_triple(symbol, duration_sec, df)
+    det_triple = engine.detect_triple(symbol, duration_sec, df, force=force)
     return KeyResult(
         symbol=symbol,
         duration_sec=duration_sec,

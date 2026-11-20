@@ -409,6 +409,18 @@
 
     **表内要更正的 6 处**：① AU/AG 归在「21:00-01:00」，实际到 **02:30**（库里 1m 到 02:29）；② UR/SF/SM 归在有夜盘组，库里 2026 年以来**没有任何 21:00 后的 1m**；③ CY 归在「无夜盘」，库里 CY 有 21:00-23:00 的 5m/15m；④ 中金所列按商品的 10:15-10:30 节间生成，但**股指期货没有节间**（IF 1m 在 10:15-10:29 连续有成交），所以表的 5m/15m 少 10:15/10:20/10:25 三根；⑤ 原木代码写成 **LY**，库里是 `DCE.lg`；⑥ 表缺 10 个库里在跑的主连：`SHFE.ad/ao/br/op`、`DCE.bz`、`INE.ec`、`CZCE.PF/PL/SO/SR`（含白糖 SR）；另 `CZCE.LR`（晚籼稻）库里 1m 停在 2026-01-16。
 
+57. **裁决：严格档与三重告警也进抢跑通道**（2026-11-20）。触发场景：`DCE.eb` 30m 11-19 23:00 那根直接开仓（+2687.98），但抢跑页里没有对应提醒，「造成浪费」。**根因**：`core/hs_fanout.py::detect_one` 在 `prov=True` 时显式跳过 strict 与 triple（`det_strict = None if prov else ...`），只有常规头肩会进抢跑 ⇒ 苯乙烯那根若属严格档/三重，抢跑必然空窗。用户裁决：**三个通道全部进抢跑**。
+
+    **改法（四处，口径不变、只扩通道）**：
+    - `core/hs_fanout.py`：`det_strict`/`det_triple` 不再按 `prov` 置空，一律计算；docstring 记裁决与「抢跑走独立引擎、只提醒不开仓」。
+    - `core/db_monitor.py::_deliver_provisional`：改为 `dets = tier_dets(res.det_strict, res.det)`，非空再 append `res.det_triple`，逐条走 `self.prov_engine.deliver(..., provisional=True)`，日志 `[monitor] 抢跑告警 {alert_tag(det)} ...`。`prov_engine.on_signal` 仍为 None ⇒ 抢跑**仍然不开模拟盘单**（只把「提前看到」这件事补全）。
+    - `core/alert_store.py::list_alerts`：`strict=True` 额外排除 `extra.provisional` ⇒ **严格页只列已收线的严格档**，半截 K 上的严格档归抢跑页（否则同一形态会在两页重复，且严格页混入未确认根）。
+    - `HS_RULES.md`：抢跑段、发射顺序、飞书卡片说明、§5 TODO 同步。
+
+    **通道归属**（记清，免得下次又问「为什么严格页看不到」）：常规 ⇒ 告警页 + 抢跑页；严格 ⇒ 严格页（收线）+ **抢跑页（半截）**，不进告警页；三重 ⇒ 告警页 + 抢跑页，**不进严格页**。
+    **副作用（有意保留）**：`emit_alert` 的飞书条件是 `if strict or triple`，没给 provisional 加排除 ⇒ 严格档/三重若在抢跑窗口被识别，会**先推一张抢跑卡、收线再推一张**。嫌吵的还原配方已写进 HS_RULES.md：把条件改成 `(strict or triple) and not provisional`。
+    **未验证项**：本地只做 `py_compile`；抢跑窗口（14:45-15:00 / 22:30-23:00）内的三重/严格实际触发要等生产重部署后的下一场夜盘才能看 `reports/monitor.log` 里的 `抢跑告警` 行。
+
 ---
 
 ## 待决策冲突（需用户统一裁决）
