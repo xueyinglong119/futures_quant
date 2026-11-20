@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from utils.trading_session import aggregate_session_bars
+from utils.trading_session import NIGHT_TAIL, aggregate_session_bars
 
 TZ_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -103,7 +103,9 @@ class SessionKlineFeed:
             s: {} for s in main_symbols
         }
         self._session_rows: dict[str, list[dict]] = {s: [] for s in main_symbols}
-        self._known_ends: dict[str, set[str]] = {s: set() for s in main_symbols}
+        # 每组的收线键按「谁合成出来的」记，不按标注日期：夜盘跨零点那几根标注在次日凌晨，
+        # 但它们是前一晚那一组产出的，按日期清理会把它们误删（然后再也没人补回来）。
+        self._group_ends: dict[str, dict[date, set[str]]] = {s: {} for s in main_symbols}
         self._visible_counts: dict[str, int] = {s: 0 for s in main_symbols}
 
     # 日盘/夜盘最长有效成交约 30 分钟；回测中未收盘分钟线 OHLC 会随 tick 变化，需反复刷新
@@ -133,26 +135,23 @@ class SessionKlineFeed:
             return
 
         rows = self._session_rows[main_symbol]
-        known = self._known_ends[main_symbol]
+        pool = list(day_buf)
+        # 当晚那一夜还要带上次日凌晨 02:30 前的分钟线（有色到 01:00、贵金属与原油到 02:30）
+        tail = self._day_minutes[main_symbol].get(trade_date + timedelta(days=1))
+        if tail:
+            pool.extend(m for m in tail if m["datetime"].time() < NIGHT_TAIL[1])
 
         # 增量 ingest 时同一交易日会多次触发合成；必须整日复算，否则首根分钟线
         # 就会固化成 open=high=low=close 的错误 OHLC。
-        stale_ends: set[str] = set()
-        kept: list[dict] = []
-        for row in rows:
-            dt_end = datetime.fromisoformat(row["datetime_end"])
-            if dt_end.date() == trade_date:
-                stale_ends.add(row["datetime_end"])
-            else:
-                kept.append(row)
+        stale_ends = self._group_ends[main_symbol].get(trade_date, set())
+        kept = [row for row in rows if row["datetime_end"] not in stale_ends]
 
-        for end in stale_ends:
-            known.discard(end)
-
-        for bar in aggregate_session_bars(day_buf, trade_date, time_label="end"):
-            known.add(bar["datetime_end"])
+        fresh: set[str] = set()
+        for bar in aggregate_session_bars(pool, trade_date, time_label="end"):
+            fresh.add(bar["datetime_end"])
             kept.append(bar)
 
+        self._group_ends[main_symbol][trade_date] = fresh
         kept.sort(key=_bar_end_ns)
         self._session_rows[main_symbol] = kept
 
@@ -165,7 +164,7 @@ class SessionKlineFeed:
         minute_df = self.minute_klines[main_symbol]
         self._day_minutes[main_symbol].clear()
         self._session_rows[main_symbol].clear()
-        self._known_ends[main_symbol].clear()
+        self._group_ends[main_symbol].clear()
         self._last_minute_ns[main_symbol] = None
 
         day_buf = self._day_minutes[main_symbol]

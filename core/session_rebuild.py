@@ -28,6 +28,7 @@ from core.kline_store import (
     upsert_bars,
 )
 from utils.trading_session import (
+    NIGHT_TAIL,
     aggregate_session_1h_bars,
     aggregate_session_2h_bars,
     aggregate_session_3h_bars,
@@ -122,17 +123,26 @@ def aggregate_symbol_session(
     *,
     include_night: bool = True,
 ) -> dict[SessionTf, list[dict[str, Any]]]:
-    """按自然日分组合成小节 K，返回可入库行。"""
+    """按自然日分组合成小节 K，返回可入库行。
+
+    夜盘那一组还要带上**次日凌晨 02:30 前**的分钟线：有色跨零点交易到 01:00、贵金属与
+    原油到 02:30，只喂当晚的分钟，跨零点那段就留在次日那一组里没人认领（次日的夜盘筛选
+    只认 21:00 之后），那半小时到三个半小时的成交会既不进当晚的会话 K、也不进次日日盘。
+    """
     by_day: dict[date, list[dict[str, Any]]] = {}
     for m in minute_bj:
         by_day.setdefault(m["datetime"].date(), []).append(m)
 
     result: dict[SessionTf, list[dict[str, Any]]] = {tf: [] for tf in tfs}
     for trade_date in sorted(by_day):
-        day_mins = by_day[trade_date]
+        pool = list(by_day[trade_date])
+        if include_night:
+            tail = by_day.get(trade_date + timedelta(days=1))
+            if tail:
+                pool.extend(m for m in tail if m["datetime"].time() < NIGHT_TAIL[1])
         for tf in result:
             agg = _AGGREGATORS[tf]
-            raw = agg(day_mins, trade_date, include_night=include_night)
+            raw = agg(pool, trade_date, include_night=include_night)
             result[tf].extend(session_dicts_to_store_rows(raw))
     return result
 
