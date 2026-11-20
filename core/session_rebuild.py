@@ -6,6 +6,8 @@
   3h: 14:15 / 15:00
   4h: 15:00
 会先删除该品种对应周期在重建范围内的旧行（含天勤整点口径），再 upsert 新结果。
+删除范围只取本次真正重算出来的那几根的跨度，绝不外扩：外扩会抹掉窗内无法重建的
+邻日/邻夜会话K，而校验窗只往前走，那些根再也补不回来。
 """
 
 from __future__ import annotations
@@ -174,6 +176,7 @@ def rebuild_symbol_session_klines(
     execute=False 时只统计将生成的根数，不删不写。
     """
     tf_list = list(tfs)
+    bounded = start is not None or end is not None
     # SQL 侧先按窗裁剪（UTC/北京最多差 8h，两侧各扩一天）
     q_start = (start - timedelta(days=1)) if start else None
     q_end = (end + timedelta(days=1)) if end else None
@@ -201,15 +204,18 @@ def rebuild_symbol_session_klines(
     for tf in tf_list:
         rows = built.get(tf, [])
         stats[f"{tf}_bars"] = len(rows)
-        if not execute:
+        if not execute or not rows:
             continue
         dur = TF_DURATION[tf]
-        # 清理窗：北京标注与旧 UTC 整点都可能落在 [start-1d, end+1d]
-        del_start = (start - timedelta(days=1)) if start else None
-        del_end = (end + timedelta(days=1)) if end else None
+        if bounded:
+            # 删除带 == 本次重算出来的跨度；无 1m 可依时一根都不删
+            ends = [r["datetime_end"] for r in rows]
+            del_start, del_end = min(ends), max(ends)
+        else:
+            del_start = del_end = None
         deleted = delete_duration_range(conn, symbol, dur, del_start, del_end)
         stats[f"{tf}_deleted"] = deleted
-        stats[f"{tf}_upserted"] = upsert_bars(conn, symbol, dur, rows) if rows else 0
+        stats[f"{tf}_upserted"] = upsert_bars(conn, symbol, dur, rows)
     return stats
 
 
