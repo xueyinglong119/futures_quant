@@ -105,8 +105,10 @@ def make_triple_strategy(duration_sec: int) -> TriplePatternStrategy:
 
     规格里的 `MIN_FORM_CANDLE=10` 是全局值，但短周期 10 根只是十几分钟，
     所以按下限取 `max(10, 该周期 min_span_bars)`。
-    量能闸按规格先剔脉冲巨量（`PULSE_MULTIPLE=3`）再求段均量：一根天量会把整段
-    均值顶上去，把「第三段确实在缩量」误判成放量。头肩那套脉冲闸仍只归严格档，不动。
+    量能闸（11-20 改）三种口径满足其一：段内同向根均量（顶取上涨根、底取下跌根，
+    先剔 `PULSE_MULTIPLE=3` 的单根天量再求均值，否则一根天量会把整段均值顶上去）、
+    三个极值当根单量、当根单量逐次排 + 当根 MACD 柱逐次下降。
+    三种口径都要求第三条腿最弱（顶缩量、底放量）。头肩那套脉冲闸仍只归严格档，不动。
     """
     cfg = TF_CONFIGS.get(duration_sec, TF_CONFIGS[DURATION_30M])
     return TriplePatternStrategy(

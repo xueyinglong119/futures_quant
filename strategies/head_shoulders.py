@@ -222,6 +222,16 @@ class HeadShouldersStrategy:
             pivot_lows, pivot_highs, klines, volume, traded, symbol, strict=strict
         )
 
+    def _pulse_kept(self, seg: np.ndarray) -> np.ndarray:
+        """开脉冲过滤时剔掉 >PULSE_MULTIPLE×均值 的单根；无可剔时原样返回。"""
+        if not self.strict_pulse_filter or seg.size == 0:
+            return seg
+        base = float(seg.mean())
+        if base <= 0:
+            return seg
+        kept = seg[seg <= self.strict_pulse_multiple * base]
+        return kept if kept.size else seg
+
     def _vol_avg(self, vols: np.ndarray, a: int, b: int) -> float | None:
         """[a,b] 闭区间均量。开脉冲过滤时先剔掉 >PULSE_MULTIPLE×均值 的单根再求均值。"""
         if b < a:
@@ -229,13 +239,7 @@ class HeadShouldersStrategy:
         seg = vols[max(0, a) : b + 1]
         if seg.size == 0:
             return None
-        if self.strict_pulse_filter:
-            base = float(seg.mean())
-            if base > 0:
-                kept = seg[seg <= self.strict_pulse_multiple * base]
-                if kept.size:
-                    seg = kept
-        return float(seg.mean())
+        return float(self._pulse_kept(seg).mean())
 
     def _volumes_ok(
         self,

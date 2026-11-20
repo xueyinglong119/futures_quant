@@ -33,8 +33,9 @@ class TriplePatternStrategy(HeadShouldersStrategy):
     ④ 区间极值——`[P1, P3]` 内不能出现比 `min(P)`（顶为 `max(P)`）更低（高）超过
     同一容差的收盘，否则那是被第四脚打掉的形态；
     ⑤ `P1→P3` 根数 ≥ `min_form_bars`、≤ `max_span_bars`；
-    ⑥ 量能——顶 `V2 ≤ V1` 且 `V3 < V2`，底把 `<`/`≤` 对调（三段均量递减，
-    最大量 → 次大量 → 最小量），均量前剔单根天量；
+    ⑥ 量能——第三极值那条腿最弱：顶缩量（`V1>V3` 且 `V2>V3`）、底放量（`V1<V3` 且
+    `V2<V3`），三种口径满足其一即过：段内同向根均量（均量前剔单根天量）、三个极值
+    当根单量、或「当根单量逐次排 + 当根 MACD 柱逐次下降」；
     ⑦ 形态高度三件套——≥ `min_head_neck_points` 价点、≥ `min_head_neck_ratio` 比例、
     三个极值逐个离颈线 ≥ `shoulder_prominence_ratio`×高度。
 
@@ -49,6 +50,10 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         min_form_bars: int = 10,
         time_dev_threshold: float = 0.5,
         time_filter: bool = False,
+        macd_fast: int = 12,
+        macd_slow: int = 26,
+        macd_signal: int = 9,
+        macd_warmup_bars: int = 250,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -56,6 +61,10 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         self.min_form_bars = min_form_bars
         self.time_dev_threshold = time_dev_threshold
         self.time_filter = time_filter
+        self.macd_fast = macd_fast
+        self.macd_slow = macd_slow
+        self.macd_signal = macd_signal
+        self.macd_warmup_bars = macd_warmup_bars
 
     def _scan(
         self,
@@ -198,15 +207,9 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         prior = [q[0] for q in react_pivots if q[0] < idx1]
         if prior:
             start = max(start, max(prior))
-        v_seg1 = self._vol_avg(vols, start, idx1)
-        v_seg2 = self._vol_avg(vols, idx_n1, idx2)
-        v_seg3 = self._vol_avg(vols, idx_n2, idx3)
-        if v_seg1 is None or v_seg2 is None or v_seg3 is None:
-            return None
-        if bottom:
-            if not (v_seg2 < v_seg1 and v_seg3 <= v_seg2):
-                return None
-        elif not (v_seg2 <= v_seg1 and v_seg3 < v_seg2):
+        if not self._volume_ok(
+            klines, vols, ((start, idx1), (idx_n1, idx2), (idx_n2, idx3)), bottom
+        ):
             return None
 
         t1 = idx2 - idx1
@@ -223,6 +226,92 @@ class TriplePatternStrategy(HeadShouldersStrategy):
             "neck": neck, "neck_l": v1, "neck_r": v2, "peak": peak, "height": height,
             "spread": spread, "time_dev": time_dev,
         }
+
+    def _volume_ok(
+        self,
+        klines: pd.DataFrame,
+        vols: np.ndarray,
+        legs: tuple[tuple[int, int], ...],
+        bottom: bool,
+    ) -> bool:
+        """量能闸：第三个极值那条腿必须最弱，三种口径满足其一即放行。
+
+        顶要第三段缩量（V1>V3 且 V2>V3），底要第三段放量（V1<V3 且 V2<V3）。
+        口径1 段内同向根均量。顶只数上涨根、底只数下跌根——砸出颈线的那几根反向
+        放量不算这一波的推动量，混进段均量会把「第三段确实在缩」误判成放量。
+        口径2 三个极值当根单量，同上。
+        口径3 三个极值当根单量逐次排（顶 V1>V2>V3、底 V1<V2<V3），
+        且三个极值当根的 MACD 柱逐次下降。
+        注意口径3 的量是口径2 的子集（逐次排必然第三根最小），所以它只能和口径2
+        一起放行；要让它单独起作用得把量那半句摘掉，改成纯动能支。
+        """
+        at_bar = tuple(float(vols[b]) for _, b in legs)
+        means = self._same_dir_means(vols, klines, legs, bottom=bottom)
+        if means is not None and self._last_leg_smallest(means, bottom):
+            return True
+        if self._last_leg_smallest(at_bar, bottom):
+            return True
+        return self._momentum_fades(klines, at_bar, legs, bottom)
+
+    def _same_dir_means(
+        self,
+        vols: np.ndarray,
+        klines: pd.DataFrame,
+        legs: tuple[tuple[int, int], ...],
+        *,
+        bottom: bool,
+    ) -> tuple[float, float, float] | None:
+        """每段只取同向那几根的均量；某段一根同向都没有，这条口径判不了。"""
+        closes = klines["close"].to_numpy(dtype="float64")
+        out: list[float] = []
+        for a, b in legs:
+            sel = [
+                k
+                for k in range(max(1, a) + 1, b + 1)
+                if (closes[k] < closes[k - 1] if bottom else closes[k] > closes[k - 1])
+            ]
+            if not sel:
+                return None
+            out.append(float(self._pulse_kept(vols[sel]).mean()))
+        return (out[0], out[1], out[2])
+
+    def _momentum_fades(
+        self,
+        klines: pd.DataFrame,
+        at_bar: tuple[float, float, float],
+        legs: tuple[tuple[int, int], ...],
+        bottom: bool,
+    ) -> bool:
+        """口径3：当根单量逐次排 + 三个极值当根的 MACD 柱逐次下降。"""
+        v1, v2, v3 = at_bar
+        if not ((v1 < v2 < v3) if bottom else (v1 > v2 > v3)):
+            return False
+        m = self._macd_at(klines, legs)
+        return bool(m[0] > m[1] > m[2])
+
+    def _macd_at(
+        self, klines: pd.DataFrame, legs: tuple[tuple[int, int], ...]
+    ) -> tuple[float, float, float]:
+        """三个极值当根的通达信 MACD 柱：`2×(DIF-DEA)`，DIF=EMA(f)-EMA(s)，DEA=EMA(DIF,g)。
+
+        只从第一个极值往前多取 `macd_warmup_bars` 根算：逐根回放里全量重算是 O(n²)，
+        而 EMA 递归经过 250 根后初值权重已衰减到 1e-8，与全序列取值实质相同。
+        """
+        closes = klines["close"].to_numpy(dtype="float64")
+        lo = max(0, legs[0][1] - self.macd_warmup_bars)
+        s = pd.Series(closes[lo : legs[-1][1] + 1])
+        dif = s.ewm(span=self.macd_fast, adjust=False).mean() - s.ewm(
+            span=self.macd_slow, adjust=False
+        ).mean()
+        hist = 2.0 * (dif - dif.ewm(span=self.macd_signal, adjust=False).mean()).to_numpy()
+        return tuple(float(hist[b - lo]) for _, b in legs)
+
+    @staticmethod
+    def _last_leg_smallest(vol: tuple[float, float, float], bottom: bool) -> bool:
+        """第三段量最小：顶要缩、底要放，前两段的相对大小不作要求。"""
+        return (vol[0] < vol[2] and vol[1] < vol[2]) if bottom else (
+            vol[0] > vol[2] and vol[1] > vol[2]
+        )
 
     def _emit(
         self,
