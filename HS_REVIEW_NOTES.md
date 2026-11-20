@@ -419,7 +419,7 @@
 
     **通道归属**（记清，免得下次又问「为什么严格页看不到」）：常规 ⇒ 告警页 + 抢跑页；严格 ⇒ 严格页（收线）+ **抢跑页（半截）**，不进告警页；三重 ⇒ 告警页 + 抢跑页，**不进严格页**。
     **副作用（有意保留）**：`emit_alert` 的飞书条件是 `if strict or triple`，没给 provisional 加排除 ⇒ 严格档/三重若在抢跑窗口被识别，会**先推一张抢跑卡、收线再推一张**。嫌吵的还原配方已写进 HS_RULES.md：把条件改成 `(strict or triple) and not provisional`。
-    **未验证项**：本地只做 `py_compile`；抢跑窗口（14:45-15:00 / 22:30-23:00）内的三重/严格实际触发要等生产重部署后的下一场夜盘才能看 `reports/monitor.log` 里的 `抢跑告警` 行。
+    **已部署（11-20 夜盘，`808fc9a`）**：`up -d --build futures-api futures-monitor`，ingest 未动；容器内核过三处标记 `2 / 0 / 1`（`tier_dets(res.det_strict, res.det)` 中 db_monitor 有两处是正常的：正式路径 + 抢跑路径）。首个生效窗口是当晚 22:30-23:00，实际触发看 `reports/monitor.log` 里的 `抢跑告警` 行。
 
 ---
 
