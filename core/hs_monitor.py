@@ -269,8 +269,8 @@ def emit_alert(
                     print(f"App推送结果: {push_result}", flush=True)
                 except Exception as exc:  # noqa: BLE001
                     print(f"App推送失败: {exc}", flush=True)
-                if strict or triple:
-                    # App 被系统杀掉就收不到轮询，严格档与三重另走飞书（亮屏交给飞书自己的保活）
+                if strict or triple or provisional:
+                    # App 被系统杀掉就收不到轮询，严格档、三重与抢跑另走飞书（亮屏交给飞书自己的保活）
                     try:
                         fs_result = send_alert_feishu(alert)
                         print(f"飞书推送结果: {fs_result}", flush=True)
