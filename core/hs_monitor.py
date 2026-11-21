@@ -271,11 +271,14 @@ def emit_alert(
                     print(f"App推送失败: {exc}", flush=True)
                 if strict or triple or provisional:
                     # App 被系统杀掉就收不到轮询，严格档、三重与抢跑另走飞书（亮屏交给飞书自己的保活）
+                    # 带墙钟和卡片身份：监控日志没有逐行时间，排限流/丢卡时只能靠这些行去对
+                    stamp = datetime.now().strftime("%m-%d %H:%M:%S")
+                    who = f"{alert.kind} {alert.symbol} {alert.bar_time}"
                     try:
                         fs_result = send_alert_feishu(alert)
-                        print(f"飞书推送结果: {fs_result}", flush=True)
+                        print(f"飞书推送结果 {stamp} {who}: {fs_result}", flush=True)
                     except Exception as exc:  # noqa: BLE001
-                        print(f"飞书推送失败: {exc}", flush=True)
+                        print(f"飞书推送失败 {stamp} {who}: {exc}", flush=True)
 
             threading.Thread(target=_push, name="hs-push", daemon=True).start()
     except Exception as exc:  # noqa: BLE001
