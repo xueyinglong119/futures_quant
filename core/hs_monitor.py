@@ -55,6 +55,8 @@ STRICT_SIGNALS = os.environ.get("HS_STRICT_SIGNALS", "1") != "0"
 
 # 三重顶/底：独立第三通道，与头肩两条各自记账、同刻同根都发（HS_TRIPLE_SIGNALS=0 可整体关掉）。
 TRIPLE_SIGNALS = os.environ.get("HS_TRIPLE_SIGNALS", "1") != "0"
+# 三重的趋势方向闸（顶从上涨里来、底从下跌里来）；默认关，只给回测 A/B 用。
+TRIPLE_TREND = os.environ.get("HS_TRIPLE_TREND", "0") == "1"
 
 
 def in_provisional_window(now: datetime) -> bool:
@@ -122,6 +124,7 @@ def make_triple_strategy(duration_sec: int) -> TriplePatternStrategy:
         min_form_bars=max(10, cfg.min_span_bars),
         time_dev_threshold=0.5,
         time_filter=False,
+        trend_filter=TRIPLE_TREND,
         strict_pulse_filter=True,
         strict_pulse_multiple=3.0,
     )

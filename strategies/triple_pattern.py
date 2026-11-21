@@ -37,7 +37,10 @@ class TriplePatternStrategy(HeadShouldersStrategy):
     `V2<V3`），三种口径满足其一即过：段内同向根均量（均量前剔单根天量）、三个极值
     当根单量、或「当根单量逐次排 + 当根 MACD 柱逐次下降」；
     ⑦ 形态高度三件套——≥ `min_head_neck_points` 价点、≥ `min_head_neck_ratio` 比例、
-    三个极值逐个离颈线 ≥ `shoulder_prominence_ratio`×高度。
+    三个极值逐个离颈线 ≥ `shoulder_prominence_ratio`×高度；
+    ⑧ 趋势方向（`trend_filter`，默认关，回测 A/B 用）——「趋势末端」的另一半：顶必须
+    从上涨里来（P1 收盘高于等长前一段），底必须从下跌里来。没有这一闸时，暴跌后的
+    横盘箱体里那组等高的**反弹高点**会被当成三重顶，实际上它是底部的颈线。
 
     时间对称只是软标记：`time_filter=False` 时 `TimeDev` 进 `detail` 与 reason，
     不参与过滤也不改手数。
@@ -50,6 +53,7 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         min_form_bars: int = 10,
         time_dev_threshold: float = 0.5,
         time_filter: bool = False,
+        trend_filter: bool = False,
         macd_fast: int = 12,
         macd_slow: int = 26,
         macd_signal: int = 9,
@@ -61,6 +65,7 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         self.min_form_bars = min_form_bars
         self.time_dev_threshold = time_dev_threshold
         self.time_filter = time_filter
+        self.trend_filter = trend_filter
         self.macd_fast = macd_fast
         self.macd_slow = macd_slow
         self.macd_signal = macd_signal
@@ -132,6 +137,8 @@ class TriplePatternStrategy(HeadShouldersStrategy):
             return None
         if idx3 - idx1 + 1 < self.min_form_bars:
             return None
+        if self.trend_filter and not self._trend_ok(klines, idx1, idx3, bottom):
+            return None
 
         vols = np.asarray(klines["volume"], dtype="float64")
         cand = self._check_legs(
@@ -141,6 +148,23 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         if cand is None:
             return None
         return self._emit(cand, klines, volume, traded, symbol, bottom, kind)
+
+    def _trend_ok(
+        self, klines: pd.DataFrame, idx1: int, idx3: int, bottom: bool
+    ) -> bool:
+        """趋势末端：顶从上涨里来、底从下跌里来。
+
+        拿进入形态前**同等长度**那一段的收盘作参照（P1 往前 `P3−P1` 根），不引入新参数。
+        数据不够就看不了趋势，放行由后面的几何闸决定。
+        """
+        span = idx3 - idx1
+        prior_idx = idx1 - span
+        if span <= 0 or prior_idx < 0:
+            return True
+        closes = klines["close"]
+        prior = float(closes.iloc[prior_idx])
+        cur = float(closes.iloc[idx1])
+        return cur < prior if bottom else cur > prior
 
     def _check_legs(
         self,
