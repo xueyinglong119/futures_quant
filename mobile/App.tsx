@@ -328,6 +328,7 @@ function App() {
   const [boardLoading, setBoardLoading] = useState(false);
   const [tf, setTf] = useState("");
   const [alertMode, setAlertMode] = useState<AlertMode>("alerts");
+  const [search, setSearch] = useState("");
   const knownIds = useRef<Set<string>>(new Set());
   const seeded = useRef(false);
   const tfRef = useRef("");
@@ -335,6 +336,19 @@ function App() {
   const appState = useRef(AppState.currentState);
 
   const base = useMemo(() => apiBase.replace(/\/$/, ""), [apiBase]);
+
+  // 本地按品种过滤已拉到的告警：名称、代码（KQ.m@DCE.eb）、kind、reason 都能命中
+  const shownAlerts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return alerts;
+    return alerts.filter((item) =>
+      [item.symbol, item.kind, item.extra?.name, item.extra?.code, item.reason]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(q),
+    );
+  }, [alerts, search]);
 
   const loadSettings = useCallback(async () => {
     const saved = await AsyncStorage.getItem(STORAGE_API);
@@ -357,7 +371,7 @@ function App() {
       const dur = tfRef.current;
       const query =
         (dur ? `&duration=${encodeURIComponent(dur)}` : "") + MODE_QUERY[modeRef.current];
-      const resp = await fetch(`${base}/api/alerts?limit=50${query}`);
+      const resp = await fetch(`${base}/api/alerts?limit=200${query}`);
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`);
       }
@@ -532,6 +546,23 @@ function App() {
           {error ? (
             <Text style={styles.connWarn}>连不上服务器，请到「设置」检查服务器地址</Text>
           ) : null}
+          <View style={styles.searchRow}>
+            <TextInput
+              style={styles.search}
+              value={search}
+              onChangeText={setSearch}
+              placeholder="搜品种：名称或代码，如 苯乙烯 / eb"
+              placeholderTextColor="#7A8B9A"
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="search"
+            />
+            {search ? (
+              <Pressable style={styles.searchClear} onPress={() => setSearch("")}>
+                <Text style={styles.searchClearText}>清除</Text>
+              </Pressable>
+            ) : null}
+          </View>
           <View style={styles.tfRow}>
             {TF_CHIPS.map((label) => (
               <Pressable
@@ -552,9 +583,10 @@ function App() {
             <ActivityIndicator color="#E8B86D" style={{ marginTop: 24 }} />
           ) : (
             <FlatList
-              data={alerts}
+              data={shownAlerts}
               keyExtractor={(item) => item.id}
               contentContainerStyle={styles.list}
+              keyboardShouldPersistTaps="handled"
               ListHeaderComponent={
                 alertMode === "prov" ? (
                   <Text style={styles.meta}>
@@ -568,13 +600,15 @@ function App() {
               }
               ListEmptyComponent={
                 <Text style={styles.empty}>
-                  {alertMode === "prov"
-                    ? "暂无抢跑提醒。日盘 14:45–15:00、夜盘 22:30–23:00 才会产生。"
-                    : alertMode === "strict"
-                      ? "暂无严格告警。要同时过肩差、形态根数、三段量能三道闸才会出。"
-                      : tf
-                        ? `「${tf}」周期暂无告警。`
-                        : "暂无告警。新形态出现后会推到这里和通知栏。"}
+                  {search.trim()
+                    ? `没有匹配「${search.trim()}」的告警。`
+                    : alertMode === "prov"
+                      ? "暂无抢跑提醒。日盘 14:45–15:00、夜盘 22:30–23:00 才会产生。"
+                      : alertMode === "strict"
+                        ? "暂无严格告警。要同时过肩差、形态根数、三段量能三道闸才会出。"
+                        : tf
+                          ? `「${tf}」周期暂无告警。`
+                          : "暂无告警。新形态出现后会推到这里和通知栏。"}
                 </Text>
               }
               renderItem={({ item }) => <AlertCard item={item} base={base} />}
@@ -912,6 +946,20 @@ const styles = StyleSheet.create({
   sub: { color: "#9BB0C1", marginTop: 4, fontSize: 14 },
   tabs: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 },
   tfRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: 8, paddingHorizontal: 16, paddingBottom: 12, paddingTop: 4 },
+  searchRow: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 16, paddingTop: 4, paddingBottom: 8 },
+  search: {
+    flex: 1,
+    backgroundColor: "#0B1F33",
+    color: "#F4F0E8",
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: "#2A4A66",
+    fontSize: 14,
+  },
+  searchClear: { backgroundColor: "#143049", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9 },
+  searchClearText: { color: "#C7D3DE", fontSize: 13 },
   tab: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: "#143049", alignSelf: "flex-start" },
   tabOn: { backgroundColor: "#C45C26" },
   tabText: { color: "#F4F0E8", fontWeight: "700" },
