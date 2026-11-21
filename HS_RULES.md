@@ -144,7 +144,7 @@
 
 **推送范围（11-19 扩过一次）**：11-18 首版**只发严格档**；11-19 用户加了一条「有三重形态的也上飞书」，现口径是 **严格档 + 三重顶/底**两路进飞书，常规档和抢跑仍只进 App 列表。判定用 `Detection` 上的两个显式标记（`strict` / `triple`），不是猜 kind 字符串——三重那条在 `detect_triple` 里打 `triple=True`，**不带** `·严格` 后缀也不写 `extra.strict`，所以 App 的「严格」标签页不会混进三重。⚠️ 三重的量级和严格档不是一个数量级：旧口径全市场 60 天三重 **8205 条**（1m 4841 / 5m 2718 / 30m 506 / 1h 140）对同期严格档 1227 条，新口径（1% 粗筛 +  textbook 图形闸）收紧后还没重跑（任务 #24）。限流本身打不到（100 次/分钟），**真上线后如果 1m/5m 的三重把群刷满**，收窄办法是给飞书加周期门槛（`emit_alert` 那个 `if strict or triple` 上 and 一个 `duration_sec >= 1800`），一行。
 
-**现口径**：代码 `core/feishu_notify.py`，接线在 `core/hs_monitor.py` 那个已有的 `_push` 后台线程里、`strict or triple` 为真时追加一发，失败只打 `飞书推送结果/失败` 日志，不影响告警落库与模拟盘。签名按官方口径 `base64(HmacSHA256(key="{timestamp}\n{secret}", msg=b""))`——**key 和 msg 的位置与常规用法相反**，写反了服务端报字段校验失败，自检里专门钉了这条。
+**现口径**：代码 `core/feishu_notify.py`，接线在 `core/hs_monitor.py` 那个已有的 `_push` 后台线程里、`strict or triple` 为真时追加一发，失败只打 `飞书推送结果/失败` 日志，不影响告警落库与模拟盘。签名按官方口径 `base64(HmacSHA256(key="{timestamp}\n{secret}", msg=b""))`——**key 和 msg 的位置与常规用法相反**，写反了服务端报字段校验失败，自检里专门钉了这条。**11-20 22:00 实测撞限流**：OI 1h、RM 1h、m 1h 同一秒连发，飞书回 `code 11232 frequency limited`，后几张被拒且手机无任何提示。**11-21 修法**：发送全局串行 + 最小间隔 0.6s，撞 11232 退避重试两次（1s、2s），三条同批的严格档现在会依次送达（日志仍是每张一行 `飞书推送结果`）。
 
 **配置**（全部 `.env`，缺 `FEISHU_WEBHOOK_URL` 整条静默跳过、回 `no_webhook`）：`FEISHU_WEBHOOK_URL` 机器人地址、`FEISHU_WEBHOOK_SECRET` 只在机器人开了「签名校验」时填、`HS_PUBLIC_BASE` 填手机能访问到的服务地址（如 `http://<公网IP>:8000`）就在卡片上加「看形态图」按钮指向 `/api/alerts/{id}/chart.png`、`HS_FEISHU_NOTIFY=0` 关掉。⚠️ 这几个值在**发送时**现读，不在 import 时读：本模块可能比 `config.settings` 的 `load_dotenv()` 更早被 import，模块级求值会把地址读成空、整条通道静默失效。
 
