@@ -41,6 +41,9 @@ class TriplePatternStrategy(HeadShouldersStrategy):
     ⑧ 趋势方向（`trend_filter`，默认关，回测 A/B 用）——「趋势末端」的另一半：顶必须
     从上涨里来（P1 收盘高于等长前一段），底必须从下跌里来。没有这一闸时，暴跌后的
     横盘箱体里那组等高的**反弹高点**会被当成三重顶，实际上它是底部的颈线。
+    ⑨ 区间位置（`extreme_filter`，默认关，回测 A/B 用）——三个极值必须是回看
+    `max_span_bars` 根内的最高/最低（容差仍是 `0.25×height`）。它比 ⑧ 直接：暴跌/
+    暴涨后的箱体离前高/前低太远，直接拒掉，不靠单点收盘猜趋势。
 
     时间对称只是软标记：`time_filter=False` 时 `TimeDev` 进 `detail` 与 reason，
     不参与过滤也不改手数。
@@ -54,6 +57,7 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         time_dev_threshold: float = 0.5,
         time_filter: bool = False,
         trend_filter: bool = False,
+        extreme_filter: bool = False,
         macd_fast: int = 12,
         macd_slow: int = 26,
         macd_signal: int = 9,
@@ -66,6 +70,7 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         self.time_dev_threshold = time_dev_threshold
         self.time_filter = time_filter
         self.trend_filter = trend_filter
+        self.extreme_filter = extreme_filter
         self.macd_fast = macd_fast
         self.macd_slow = macd_slow
         self.macd_signal = macd_signal
@@ -213,6 +218,16 @@ class TriplePatternStrategy(HeadShouldersStrategy):
                 return None
         elif float(window.max()) > peak + tol:
             return None
+        # 回看更长的前一段：顶必须是前高、底必须是前低。暴跌/暴涨后的箱体离前高/前低太远，
+        # 那里等高的反弹高点/回调低点是相反方向的颈线，不是三重反转。
+        if self.extreme_filter:
+            lo = max(0, idx1 - self.max_span_bars)
+            prior = klines["close"].iloc[lo:idx1]
+            if not prior.empty:
+                if bottom and peak > float(prior.min()) + tol:
+                    return None
+                if not bottom and peak < float(prior.max()) - tol:
+                    return None
 
         # 颈线取第三脚处的位置
         neck = self._line_at(idx_n1, v1, idx_n2, v2, idx3)
