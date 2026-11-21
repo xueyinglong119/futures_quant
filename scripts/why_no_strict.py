@@ -180,7 +180,7 @@ def main() -> None:
     ap.add_argument("--symbol", default="KQ.m@INE.sc")
     ap.add_argument("--tf", type=int, default=3600)
     ap.add_argument("--at", default="2026-11-20 23:00")
-    ap.add_argument("--pad-days", type=int, default=10)
+    ap.add_argument("--pad-days", type=int, default=40)
     ap.add_argument("--max-trace", type=int, default=40)
     args = ap.parse_args()
 
@@ -200,15 +200,24 @@ def main() -> None:
     if df.empty:
         print(f"无 {args.symbol} {args.tf} 数据", flush=True)
         return
+    cfg = TF_CONFIGS.get(args.tf, TF_CONFIGS[300])
     times = pd.to_datetime(df["datetime"])
     idx0 = int((times - at).abs().argmin())
     df = df.iloc[: idx0 + 1].reset_index(drop=True)
+    # 与线上 detect_one 同口径：只喂最后 lookback_bars 根
+    if len(df) > cfg.lookback_bars:
+        df = df.iloc[-cfg.lookback_bars :].reset_index(drop=True)
+    min_len = cfg.max_span_bars + cfg.pivot_order * 2 + 5
     label = DURATION_LABELS.get(args.tf, str(args.tf))
     print(
         f"== {args.symbol} {label} 目标根#{len(df) - 1} {df.iloc[-1]['datetime']} "
-        f"收{df.iloc[-1]['close']:.1f} 量{df.iloc[-1]['volume']}（实取 {len(df)} 根）==",
+        f"收{df.iloc[-1]['close']:.1f} 量{df.iloc[-1]['volume']}"
+        f"（实取 {len(df)} 根，至少需 {min_len} 根）==",
         flush=True,
     )
+    if len(df) < min_len:
+        print(f"根数不足 {min_len}，_scan 直接返回，加大 --pad-days", flush=True)
+        return
 
     normal = make_strategy(args.tf)
     normal.trace = True
