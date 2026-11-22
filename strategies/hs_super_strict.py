@@ -4,7 +4,7 @@
 
 1. 底：右肩反弹幅度 ≥ 左肩 * 0.75；顶：右肩下跌幅度 ≥ 左肩 * 0.75
 2. 底：颈线斜率 ≥ 0；顶：颈线斜率 ≤ 0
-3. 右肩 K 线 high/low 到颈线（外推到右肩那根）的缺口 ≤ 头部深度 * 0.25
+3. 右肩 K 线 high/low 到颈线（外推到右肩那根）的缺口 ≤ 头部深度 * 0.40
 4. 底：左右肩低点价差 ≤ 头部深度 * 0.3；顶：左右肩高点价差 ≤ 0.3
 5. 右肩之后 3 根不能创新高/新低（当根看不到，`pullback_ok` 单独做后验）
 6. 头部深度不能太小
@@ -18,7 +18,7 @@ from __future__ import annotations
 import pandas as pd
 
 MIN_REBOUND_RATIO = 0.75
-MAX_GAP_RATIO = 0.25
+MAX_GAP_RATIO = 0.40
 MAX_SHOULDER_DIFF_RATIO = 0.30
 PULLBACK_BARS = 3
 
