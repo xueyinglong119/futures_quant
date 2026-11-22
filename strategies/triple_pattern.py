@@ -47,6 +47,10 @@ class TriplePatternStrategy(HeadShouldersStrategy):
     ⑨ 区间位置（`extreme_filter`，默认关，回测 A/B 用）——三个极值必须是回看
     `max_span_bars` 根内的最高/最低（容差仍是 `0.25×height`）。它比 ⑧ 直接：暴跌/
     暴涨后的箱体离前高/前低太远，直接拒掉，不靠单点收盘猜趋势。
+    ⑩ 三角形过滤（`triangle_filter`，默认关，回测 A/B 用）——顶的两个回调低点必须
+    `L2 ≤ L1`（低点抬高是上升三角形，多头中继），底的两个反弹高点必须 `H2 ≥ H1`
+    （高点走低是下降三角形，空头中继）；另加 P3/B3 不得越过 P1/B1 半个价格粗筛阈
+    （`dev_threshold/2`），防止缓慢抬升/下滑的通道被当成反转。
 
     时间对称只是软标记：`time_filter=False` 时 `TimeDev` 进 `detail` 与 reason，
     不参与过滤也不改手数。
@@ -63,6 +67,7 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         trend_window: int = 20,
         trend_threshold: float = 0.0002,
         extreme_filter: bool = False,
+        triangle_filter: bool = False,
         macd_fast: int = 12,
         macd_slow: int = 26,
         macd_signal: int = 9,
@@ -78,6 +83,7 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         self.trend_window = trend_window
         self.trend_threshold = trend_threshold
         self.extreme_filter = extreme_filter
+        self.triangle_filter = triangle_filter
         self.macd_fast = macd_fast
         self.macd_slow = macd_slow
         self.macd_signal = macd_signal
@@ -203,6 +209,17 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         idx_n2, v2 = s2
         if v1 <= 0 or abs(v2 - v1) / v1 > self.dev_threshold:
             return None
+        # 上升/下降三角形：顶的回调低点抬高（L2>L1）、底的反弹高点走低（H2<H1）
+        # 都是同向中继，不是三重反转。另拒 P3/B3 越过 P1/B1 半个粗筛阈的缓坡通道。
+        if self.triangle_filter:
+            if (bottom and v2 < v1) or (not bottom and v2 > v1):
+                return None
+            half = self.dev_threshold * 0.5
+            if bottom:
+                if price3 < price1 * (1.0 - half):
+                    return None
+            elif price3 > price1 * (1.0 + half):
+                return None
 
         tops = (price1, price2, price3)
         peak = min(tops) if bottom else max(tops)

@@ -67,6 +67,8 @@ TRIPLE_SIGNALS = os.environ.get("HS_TRIPLE_SIGNALS", "1") != "0"
 TRIPLE_TREND = os.environ.get("HS_TRIPLE_TREND", "0") == "1"
 # 三重的区间位置闸（顶须是回看窗口前高、底须是前低）；默认关，只给回测 A/B 用。
 TRIPLE_EXTREME = os.environ.get("HS_TRIPLE_EXTREME", "0") == "1"
+# 三重的三角形闸（顶 L2≤L1、底 H2≥H1，且 P3/B3 不越过 P1/B1 半个粗筛阈）；默认关，A/B 用。
+TRIPLE_TRIANGLE = os.environ.get("HS_TRIPLE_TRIANGLE", "0") == "1"
 
 
 def in_provisional_window(now: datetime) -> bool:
@@ -143,6 +145,7 @@ def make_triple_strategy(duration_sec: int) -> TriplePatternStrategy:
         trend_window=20,
         trend_threshold=0.0002,
         extreme_filter=TRIPLE_EXTREME,
+        triangle_filter=TRIPLE_TRIANGLE,
         strict_pulse_filter=True,
         strict_pulse_multiple=3.0,
     )
