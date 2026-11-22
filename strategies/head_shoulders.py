@@ -106,6 +106,7 @@ class HeadShouldersStrategy:
         max_right_above_left_ratio: float = 0.015,
         min_head_neck_ratio: float = 0.008,
         min_head_neck_points: float = 10.0,
+        min_head_boost: float = 0.003,
         stop_beyond_head_ratio: float = 0.005,
         take_profit_at_neck: bool = True,
         max_volume: int = 1,
@@ -124,6 +125,7 @@ class HeadShouldersStrategy:
         max_shoulder_head_span_ratio: float = 2.5,
         confirmed_shoulders: bool = False,
         strict_signals: bool = False,
+        strict_head_boost: bool = False,
         strict_dev_threshold: float = 0.025,
         strict_min_form_bars: int = 8,
         strict_volume_gates: bool = True,
@@ -137,6 +139,7 @@ class HeadShouldersStrategy:
         self.neck_break_ratio = neck_break_ratio
         self.max_right_above_left_ratio = max_right_above_left_ratio
         self.min_head_neck_ratio = min_head_neck_ratio
+        self.min_head_boost = min_head_boost
         self.min_head_neck_points = min_head_neck_points
         self.stop_beyond_head_ratio = stop_beyond_head_ratio
         self.take_profit_at_neck = take_profit_at_neck
@@ -156,6 +159,7 @@ class HeadShouldersStrategy:
         self.max_shoulder_head_span_ratio = max_shoulder_head_span_ratio
         self.confirmed_shoulders = confirmed_shoulders
         self.strict_signals = strict_signals
+        self.strict_head_boost = strict_head_boost
         self.strict_dev_threshold = strict_dev_threshold
         self.strict_min_form_bars = strict_min_form_bars
         self.strict_volume_gates = strict_volume_gates
@@ -467,8 +471,21 @@ class HeadShouldersStrategy:
             return None
         if height < self.min_head_neck_points:
             return None
-        if height / abs(price_h) < self.min_head_neck_ratio:
+        use_boost = strict and self.strict_head_boost
+        if not use_boost and height / abs(price_h) < self.min_head_neck_ratio:
             return None
+        if use_boost:
+            # 严格档可选：头比颈线的 0.8% 换成「头比肩 ≥0.3%」（用户 11-22 口径）
+            if bottom:
+                if (price_l - price_h) / abs(price_h) < self.min_head_boost or (
+                    price_r - price_h
+                ) / abs(price_h) < self.min_head_boost:
+                    return None
+            else:
+                if (price_h - price_l) / abs(price_l) < self.min_head_boost or (
+                    price_h - price_r
+                ) / abs(price_r) < self.min_head_boost:
+                    return None
         # 锚点落在单边急跌/急拉远端时颈线会贴着趋势走，斜率超过 1/4 头高即不成立
         if abs(p1 - p2) > 0.25 * height:
             return None

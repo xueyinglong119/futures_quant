@@ -39,8 +39,18 @@ def explain_shape(s, price_l, price_h, price_r, idx_l, idx_h, idx_r, neck_l, nec
         return [f"头高{height:.2f}<=0"], ""
     if height < s.min_head_neck_points:
         fails.append(f"头高{height:.2f}<{s.min_head_neck_points}点")
-    if height / abs(price_h) < s.min_head_neck_ratio:
+    use_boost = strict and getattr(s, "strict_head_boost", False)
+    if not use_boost and height / abs(price_h) < s.min_head_neck_ratio:
         fails.append(f"头颈比{height / abs(price_h):.3%}<{s.min_head_neck_ratio:.2%}")
+    if use_boost:
+        if bottom:
+            bl = (price_l - price_h) / abs(price_h)
+            br = (price_r - price_h) / abs(price_h)
+        else:
+            bl = (price_h - price_l) / abs(price_l)
+            br = (price_h - price_r) / abs(price_r)
+        if bl < s.min_head_boost or br < s.min_head_boost:
+            fails.append(f"头比肩L{bl:.3%}/R{br:.3%}<{s.min_head_boost:.2%}(boost)")
     if abs(p1 - p2) > 0.25 * height:
         fails.append(f"颈斜{abs(p1 - p2):.2f}>0.25h={0.25 * height:.2f}")
     prom = s.shoulder_prominence_ratio

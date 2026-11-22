@@ -19,7 +19,7 @@
 **`_shape_ok` 的闸，按代码顺序**（`:284`）
 
 1. `height > 0` 且 `height ≥ min_head_neck_points = 10` 个价点（`:62`，防小波动凑形态）
-2. `height / price ≥ 0.008`
+2. `height / price ≥ 0.008`（**严格档可选** `HS_STRICT_HEAD_BOOST=1` 换成「头比肩 ≥0.3%」：顶 `(head−左/右肩)/肩`、底 `(左/右肩−head)/head`；默认关，A/B 后再决定，用户 11-22 口径）
 3. 颈线斜率 `|p1 − p2| ≤ 0.25 × height`（锚点落在单边急涨急跌远端时颈线会贴趋势）
 4. 两肩突出：每肩离头 `≥ 0.2 × height`（`shoulder_prominence_ratio`，`:71`）
 5. `|左肩 − 右肩| ≤ 0.5 × height`
