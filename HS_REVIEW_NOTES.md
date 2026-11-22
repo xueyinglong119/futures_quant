@@ -478,6 +478,10 @@
 
     **实现（默认关，线上未动）**：`_volumes_ok` 加 `strict_volume_triple`；`HS_STRICT_VOL_TRIPLE=1` 时顶 `v1>v3 且 v2>v3`、底 `v1<v3 且 v2<v3`，否则仍是三段递减。**只搬了这条不等式，三重另外两条口径（极值当根单量、MACD 柱）没有一起搬**——用户原话只提 V1/V2/V3；要全搬再说。`why_no_strict.py` 的 `need` 文案同步。两个开关都开时，SF 平台 `875/1095/493` 满足 v1/v2>v3，按现有肩差优先应选 09:50。待跑：`-e HS_STRICT_HEAD_BOOST=1 -e HS_STRICT_VOL_TRIPLE=1` 的 300d/60d strict-A/B 与 SF 单根复查。
 
+69. **开仓来源收窄：常规档/三重只告警，只有严格 + 超严格开仓（用户 11-22）**。实现：`deliver` 已有 `trade` 开关，`db_monitor._tick` 与串行 `evaluate_df` 里按 `det.strict` 传值——严格档 `True`，常规档/三重 `False`；超严格单独投递改成默认 `trade=True`。抢跑走 `prov_engine.on_signal=None`，仍只提醒；手动开仓不受影响；已开的常规/三重仓位照旧按止盈止损跑，不回滚。
+
+    **要注意的代价**：超严格 300d 505 / 19.7% / −0.003，比严格档 2701 / 22.4% / +0.024 差；它现在也开仓，但同一形态通常严格档先到、占住 (品种,周期) 的坑，超严格的 `on_signal` 多是 no-op。三重本来就是弱通道（60d 71/14.3%），改成只告警是收紧风险。**上线**：只改 monitor 代码，`git pull --ff-only && docker compose up -d --build futures-api futures-monitor`；验证日志里常规档/三重不再有 `[paper] 开仓`、严格档仍有。
+
 ---
 
 ## 待决策冲突（需用户统一裁决）

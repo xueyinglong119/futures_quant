@@ -73,6 +73,8 @@
 
 止盈止损**沿用老规则**（±0.8/∓0.2×swing），颈线只用来算目标，**不再当严格档的开仓条件**——所以严格档进场点会比颈线突破早，是「预判入场」，假信号更多，用户据此把仓位压到一半。
 
+**开仓来源（11-22 用户裁决）**：只有**严格档和超严格**开模拟盘；常规档、三重、抢跑都只告警/推送。落地在 `deliver(trade=...)`：`db_monitor` 与串行 `evaluate_df` 里严格档/超严格传 `True`，常规档与三重传 `False`；`prov_engine.on_signal` 本来就是 `None`，抢跑不受影响。
+
 优先级与发射：严格档那条带 kind 后缀 `·严格`、reason 前缀 `严格`、`extra.strict=true`、`extra.pattern = "品种|周期|pattern_id"`（`core/hs_monitor.py:213`；必须带品种和周期，`pattern_id` 只有三根 K 线时刻，不同品种会同名）。两档同刻出时由 `tier_dets`（`core/hs_monitor.py:263`）**直接把同形态的常规档那条不发**，列表里自然只剩严格档；库里**已经存在**的同键常规档（典型是抢跑那半截 K 提前出的那条）仍由 `add_alert(supersedes=)` 打上 `superseded`（`core/alert_store.py:85`，**只标记不删**——它可能已推送、还挂着模拟盘单的 `alert_id`），`list_alerts` 默认不返回被顶掉的。`/api/alerts?strict=1` 单看这一档，App 另有独立的「严格」标签页（`mobile/App.tsx` 的 `MODE_QUERY`，与「抢跑」页同一套 mode 机制）；主「告警」页照旧显示全部（含带 `·严格` 的那条）。抢跑通道不参与严格档（`core/hs_fanout.py:83`：半截 K 只出常规档那条提醒）。
 
 模拟盘：`STRICT_LOT_RATIO = 0.5`（`core/paper_trade.py:42`）→ 预算 = 可用资金 × 50% 再开满（`:577`）。同形态时常规档那条不再发射，所以严格档先下这笔半仓，`_open` 的 (品种, 周期) 去重不会再把它挡掉（改造前是常规档先开满、严格档被「已有持仓」跳过）。

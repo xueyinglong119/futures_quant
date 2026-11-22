@@ -615,11 +615,12 @@ class HsMonitorEngine:
         if not emit:
             return 0
         n = 0
+        # 只有严格档开仓；常规档与三重只告警（11-22 用户裁决）
         for item in tier_dets(strict, det) + ([triple] if triple is not None else []):
-            n += self.deliver(item, alert_log=alert_log, push=push, toast=toast)
-        if sup is not None:
-            # 超严格只告警：trade=False 不喂模拟盘
             n += self.deliver(
-                sup, alert_log=alert_log, push=push, toast=toast, trade=False
+                item, alert_log=alert_log, push=push, toast=toast,
+                trade=bool(item.strict),
             )
+        if sup is not None:
+            n += self.deliver(sup, alert_log=alert_log, push=push, toast=toast)
         return n
