@@ -54,6 +54,8 @@ PROVISIONAL_WINDOWS: tuple[tuple[time, time], ...] = (
 STRICT_SIGNALS = os.environ.get("HS_STRICT_SIGNALS", "1") != "0"
 # 严格档可选：头比颈线 0.8% → 头比肩 0.3%（用户 11-22 口径）；默认关，A/B 后再开。
 STRICT_HEAD_BOOST = os.environ.get("HS_STRICT_HEAD_BOOST", "0") == "1"
+# 严格档量能：默认三段递减；=1 改用三重同款「第三腿最弱」（顶 v1/v2>v3、底 v1/v2<v3）。
+STRICT_VOL_TRIPLE = os.environ.get("HS_STRICT_VOL_TRIPLE", "0") == "1"
 # 超严格档：独立告警通道，只提醒不开仓；默认关，A/B 后确认再开。
 SUPER_STRICT = os.environ.get("HS_SUPER_STRICT", "0") == "1"
 
@@ -106,6 +108,7 @@ def make_strategy(duration_sec: int) -> HeadShouldersStrategy:
         duration_sec=duration_sec,
         strict_signals=STRICT_SIGNALS,
         strict_head_boost=STRICT_HEAD_BOOST,
+        strict_volume_triple=STRICT_VOL_TRIPLE,
     )
 
 

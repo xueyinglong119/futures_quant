@@ -129,6 +129,7 @@ class HeadShouldersStrategy:
         strict_dev_threshold: float = 0.025,
         strict_min_form_bars: int = 8,
         strict_volume_gates: bool = True,
+        strict_volume_triple: bool = False,
         strict_pulse_filter: bool = False,
         strict_pulse_multiple: float = 3.0,
     ):
@@ -163,6 +164,7 @@ class HeadShouldersStrategy:
         self.strict_dev_threshold = strict_dev_threshold
         self.strict_min_form_bars = strict_min_form_bars
         self.strict_volume_gates = strict_volume_gates
+        self.strict_volume_triple = strict_volume_triple
         self.strict_pulse_filter = strict_pulse_filter
         self.strict_pulse_multiple = strict_pulse_multiple
         self._traded_patterns: dict[str, set[str]] = {}
@@ -294,6 +296,11 @@ class HeadShouldersStrategy:
         v3 = self._vol_avg(vols, neck_r_idx, idx_r)
         if v1 is None or v2 is None or v3 is None:
             return False
+        if self.strict_volume_triple:
+            # 三重同款「第三腿最弱」：顶 v1>v3 且 v2>v3；底 v1<v3 且 v2<v3
+            if bottom:
+                return v1 < v3 and v2 < v3
+            return v1 > v3 and v2 > v3
         if bottom:
             return v2 < v1 and v3 <= v2
         return v2 <= v1 and v3 < v2

@@ -155,7 +155,10 @@ def instrument(strat, df_all):
         v1 = strat._vol_avg(vols, start, idx_l)
         v2 = strat._vol_avg(vols, neck_l_idx, idx_h)
         v3 = strat._vol_avg(vols, neck_r_idx, idx_r)
-        need = "v2<v1 且 v3<=v2" if bottom else "v2<=v1 且 v3<v2"
+        if getattr(strat, "strict_volume_triple", False):
+            need = "v1<v3 且 v2<v3(三重)" if bottom else "v1>v3 且 v2>v3(三重)"
+        else:
+            need = "v2<v1 且 v3<=v2" if bottom else "v2<=v1 且 v3<v2"
         print(
             f"  [量能闸·{'底' if bottom else '顶'}] 左#{idx_l} 头#{idx_h} 右#{idx_r} "
             f"段1[#{start}..#{idx_l}]{v1:.0f} 段2[#{neck_l_idx}..#{idx_h}]{v2:.0f} "

@@ -474,6 +474,10 @@
 
     **实现（默认关，线上未动）**：`HeadShouldersStrategy` 加 `min_head_boost=0.003` + `strict_head_boost`；`_shape_ok` 在 `strict and strict_head_boost` 时跳过 0.8%，改查顶 `(head−左/右肩)/肩 ≥0.3%`、底 `(左/右肩−head)/head ≥0.3%`；10 点闸和其余所有闸不变，**常规档仍用 0.8%**。`make_strategy` 读 `HS_STRICT_HEAD_BOOST`（默认 `0`）；`why_no_strict.py` 的镜像闸同步。0.8% 拿掉后，现有「肩差优先」的择优应自然选 09:50（肩差 3 点 vs 09:26 的 20 点），先不加 `shoulder_mode=nearest`；若 A/B 里仍不选，再补。待跑：`-e HS_STRICT_HEAD_BOOST=1` 的 300d/60d strict-A/B，以及 SF 单根 `why_no_strict` 确认左肩变成 09:50。
 
+68. **严格档量能改成三重同款「第三腿最弱」（用户 11-22，顶/底都改）**。接 #67 的 SF 诊断：`HS_STRICT_HEAD_BOOST=1` 下 09:46/09:49 平台已过形状闸，但死在头肩严格档的三段递减 `v2<=v1`（平台 `875 / 1095 / 493`，v2>v1）；用户指出当初的口径是「V1、V2 都大于 V3 即可」，那是**三重通道** #52 的第三腿最弱规则，不是头肩严格档。用户裁决：**头肩底的能量闸也按三重规则来（顶底都改）**。
+
+    **实现（默认关，线上未动）**：`_volumes_ok` 加 `strict_volume_triple`；`HS_STRICT_VOL_TRIPLE=1` 时顶 `v1>v3 且 v2>v3`、底 `v1<v3 且 v2<v3`，否则仍是三段递减。**只搬了这条不等式，三重另外两条口径（极值当根单量、MACD 柱）没有一起搬**——用户原话只提 V1/V2/V3；要全搬再说。`why_no_strict.py` 的 `need` 文案同步。两个开关都开时，SF 平台 `875/1095/493` 满足 v1/v2>v3，按现有肩差优先应选 09:50。待跑：`-e HS_STRICT_HEAD_BOOST=1 -e HS_STRICT_VOL_TRIPLE=1` 的 300d/60d strict-A/B 与 SF 单根复查。
+
 ---
 
 ## 待决策冲突（需用户统一裁决）
