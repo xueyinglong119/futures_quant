@@ -96,7 +96,7 @@ def _job(job: tuple[str, int, int]):
     try:
         bars = load_bars(conn, symbol, tf, start=datetime.now() - timedelta(days=days))
         if len(bars) < _min_bars(tf):
-            return tf, symbol, 0, 0, 0, 0, 0, len(bars), [], [], []
+            return tf, symbol, 0, 0, 0, 0, 0, len(bars), [], [], [], [], []
         hits = replay_detail(symbol, tf, bars, False, strict_tier=True)
         df, super_hits, r5_pass, r5_fail, r5_pending, filtered = _tag_hits(
             symbol, tf, bars, hits
