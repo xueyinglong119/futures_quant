@@ -40,6 +40,7 @@ class KeyResult:
     prov: bool = False
     det_strict: Detection | None = None
     det_triple: Detection | None = None
+    det_super: Detection | None = None
 
 
 def shard_of(symbol: str, count: int) -> int:
@@ -85,6 +86,8 @@ def detect_one(
     det_strict = engine.detect_strict(symbol, duration_sec, df)
     det = engine.detect(symbol, duration_sec, df, force=force)
     det_triple = engine.detect_triple(symbol, duration_sec, df, force=force)
+    # 超严格只走收线键；抢跑那半截 K 不算（告警只认右肩收盘）
+    det_super = None if prov else engine.detect_super(symbol, duration_sec, df)
     return KeyResult(
         symbol=symbol,
         duration_sec=duration_sec,
@@ -95,6 +98,7 @@ def detect_one(
         prov=prov,
         det_strict=det_strict,
         det_triple=det_triple,
+        det_super=det_super,
     )
 
 

@@ -255,8 +255,6 @@ class DbHsMonitor:
             # 但模拟盘每个 (品种, 周期) 只有一个坑，先到的头肩拿到开仓权。
             if res.det_triple is not None:
                 dets.append(res.det_triple)
-            if not dets:
-                continue
             # 严格档先出：同形态时常规档那条不发，模拟盘也按它的 50% 手数口径
             for det in dets:
                 n = self.engine.deliver(
@@ -270,6 +268,23 @@ class DbHsMonitor:
                     tag = alert_tag(det)
                     print(
                         f"[monitor] {tag} {res.symbol} {label} @ {res.last_dt:%Y-%m-%d %H:%M}",
+                        flush=True,
+                    )
+                alerts += n
+            # 超严格独立通道：只告警/飞书，不喂模拟盘
+            if res.det_super is not None:
+                n = self.engine.deliver(
+                    res.det_super,
+                    alert_log=self.alert_log,
+                    push=True,
+                    toast=False,
+                    trade=False,
+                )
+                if n:
+                    label = DURATION_LABELS.get(res.duration_sec, str(res.duration_sec))
+                    print(
+                        f"[monitor] {alert_tag(res.det_super)} {res.symbol} {label} "
+                        f"@ {res.last_dt:%Y-%m-%d %H:%M}",
                         flush=True,
                     )
                 alerts += n

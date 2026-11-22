@@ -52,6 +52,8 @@ PROVISIONAL_WINDOWS: tuple[tuple[time, time], ...] = (
 # 严格档：与常规档同刻触发，多两肩价差 Dev + 形态根数 + 三段均量递减三道闸，优先级最高
 # （同形态时只出严格档那条）。HS_STRICT_SIGNALS=0 可整体关掉。
 STRICT_SIGNALS = os.environ.get("HS_STRICT_SIGNALS", "1") != "0"
+# 超严格档：独立告警通道，只提醒不开仓；默认关，A/B 后确认再开。
+SUPER_STRICT = os.environ.get("HS_SUPER_STRICT", "0") == "1"
 
 # 三重顶/底：独立第三通道，与头肩两条各自记账、同刻同根都发（HS_TRIPLE_SIGNALS=0 可整体关掉）。
 TRIPLE_SIGNALS = os.environ.get("HS_TRIPLE_SIGNALS", "1") != "0"
@@ -213,6 +215,7 @@ def emit_alert(
     provisional: bool = False,
     strict: bool = False,
     triple: bool = False,
+    super_strict: bool = False,
 ) -> str | None:
     """写告警并推送，返回告警 id，供模拟账户把这笔单和告警对上。"""
     label = DURATION_LABELS.get(duration_sec, str(duration_sec))
@@ -221,6 +224,8 @@ def emit_alert(
         kind = f"{kind}·抢跑"
     if strict:
         kind = f"{kind}·严格"
+    if super_strict:
+        kind = f"{kind}·超严格"
     title = f"{name} {label} {kind}"
     body = f"K线 {when.strftime('%m-%d %H:%M')} | {reason}"
     print(f"!!! HS_ALERT !!! {title} | {symbol} | {body}", flush=True)
@@ -247,6 +252,8 @@ def emit_alert(
         extra["provisional"] = True
     if strict:
         extra["strict"] = True
+    if super_strict:
+        extra["super_strict"] = True
     pattern_id = str((detail or {}).get("pattern_id") or "")
     # 顶掉用的键必须带上品种和周期：pattern_id 只由三根 K 线时刻组成，不同品种会同名
     pattern_key = f"{symbol}|{duration_sec}|{pattern_id}" if pattern_id else None
@@ -275,7 +282,7 @@ def emit_alert(
                     print(f"App推送结果: {push_result}", flush=True)
                 except Exception as exc:  # noqa: BLE001
                     print(f"App推送失败: {exc}", flush=True)
-                if strict or triple or provisional:
+                if strict or triple or provisional or super_strict:
                     # App 被系统杀掉就收不到轮询，严格档、三重与抢跑另走飞书（亮屏交给飞书自己的保活）
                     # 带墙钟和卡片身份：监控日志没有逐行时间，排限流/丢卡时只能靠这些行去对
                     stamp = datetime.now().strftime("%m-%d %H:%M:%S")
@@ -304,6 +311,7 @@ class Detection:
     df: pd.DataFrame
     strict: bool = False
     triple: bool = False
+    super_strict: bool = False
 
 
 def _pattern_of(det: Detection) -> str:
@@ -324,7 +332,9 @@ def tier_dets(strict: Detection | None, normal: Detection | None) -> list[Detect
 
 
 def alert_tag(det: Detection) -> str:
-    """日志前缀：让严格档、三重通道和普通头肩在监控输出里一眼分开。"""
+    """日志前缀：让严格档、超严格、三重通道和普通头肩在监控输出里一眼分开。"""
+    if det.super_strict:
+        return "超严格告警"
     if det.strict:
         return "严格告警"
     if det.triple:
@@ -454,6 +464,31 @@ class HsMonitorEngine:
             strict=True,
         )
 
+    def detect_super(
+        self,
+        symbol: str,
+        duration_sec: int,
+        df: pd.DataFrame,
+    ) -> Detection | None:
+        """超严格档：严格档同一候选 + 用户附加校验，只告警不开仓。"""
+        if df is None or df.empty or not SUPER_STRICT:
+            return None
+        key = self._key(symbol, duration_sec)
+        strategy = self._strategy(symbol, duration_sec)
+        signal = strategy.on_bar_super_strict(df, max_volume=1, symbol=key)
+        if signal is None:
+            return None
+        kind = "头肩顶" if signal.action == "sell" else "头肩底"
+        return Detection(
+            symbol=symbol,
+            duration_sec=duration_sec,
+            last_dt=self._last_dt(df),
+            kind=kind,
+            signal=signal,
+            df=df,
+            super_strict=True,
+        )
+
     def detect_triple(
         self,
         symbol: str,
@@ -509,6 +544,7 @@ class HsMonitorEngine:
         push: bool = True,
         toast: bool = False,
         provisional: bool = False,
+        trade: bool = True,
     ) -> int:
         """发告警 + 通知模拟账户，同一 (品种周期, 类型, K线时刻, reason) 只发一次。
 
@@ -533,8 +569,9 @@ class HsMonitorEngine:
             provisional=provisional,
             strict=det.strict,
             triple=det.triple,
+            super_strict=det.super_strict,
         )
-        if self.on_signal is not None:
+        if trade and self.on_signal is not None:
             try:
                 self.on_signal(
                     det.symbol,
@@ -568,9 +605,15 @@ class HsMonitorEngine:
         strict = self.detect_strict(symbol, duration_sec, df)
         det = self.detect(symbol, duration_sec, df, force=force)
         triple = self.detect_triple(symbol, duration_sec, df, force=force)
+        sup = self.detect_super(symbol, duration_sec, df)
         if not emit:
             return 0
         n = 0
         for item in tier_dets(strict, det) + ([triple] if triple is not None else []):
             n += self.deliver(item, alert_log=alert_log, push=push, toast=toast)
+        if sup is not None:
+            # 超严格只告警：trade=False 不喂模拟盘
+            n += self.deliver(
+                sup, alert_log=alert_log, push=push, toast=toast, trade=False
+            )
         return n

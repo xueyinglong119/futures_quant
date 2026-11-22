@@ -464,7 +464,7 @@
 
     **时点**：用户裁决触发仍照旧（右肩收盘当根）⇒ 规则 5 当根看不到，只能后验；`strategies/hs_super_strict.py` 的 `check()` 只算 1/2/3/4/6，`pullback_ok()` 单独在右肩后第 3 根回填（回测用未来 3 根标记，实盘不撤回告警）。新通道定为独立 `·超严格`（不动严格），只告警、不开仓、飞书照推、默认关，先 A/B。
 
-    **本轮代码**：`strategies/hs_super_strict.py`（校验）+ `scripts/super_strict_ab.py`（在现有严格档命中上后验套六条，输出「严格 N → 超严格(1-4/6) M（规则5 过/不过/待定）」和三种胜负）。**尚未接线上告警通道**；A/B 数字回来后按用户裁决再接 `Detection`/推送/App 筛选项。
+    **本轮代码**：`strategies/hs_super_strict.py`（校验）+ `scripts/super_strict_ab.py`（在现有严格档命中上后验套六条，输出「严格 N → 超严格(1-4/6) M（规则5 过/不过/待定）」和三种胜负）。**线上通道已接（11-21，默认关）**：`HS_SUPER_STRICT=1` 才启用；新增 `Detection.super_strict`、`detect_super`、fanout/db_monitor 投递，`deliver(trade=False)` **只告警/飞书、不开模拟盘**，kind `·超严格`、`extra.super_strict=true`；App 严格页按 `extra.strict` 取不会混入。规则 5 仍只在回测后验，发射仍靠 1/2/3/4/6。A/B 数字回来再决定是否写进 `.env`。
 
 ---
 
