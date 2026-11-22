@@ -104,6 +104,7 @@ def list_alerts(
     duration: str | None = None,
     provisional: bool | None = None,
     strict: bool | None = None,
+    super_strict: bool | None = None,
     include_superseded: bool = False,
 ) -> list[dict[str, Any]]:
     """`duration` 是周期标签（如 "5m"），只按 `extra.duration` 精确过滤。
@@ -131,6 +132,12 @@ def list_alerts(
             for a in alerts
             if bool((a.get("extra") or {}).get("strict")) == strict
             and not (strict and bool((a.get("extra") or {}).get("provisional")))
+        ]
+    if super_strict is not None:
+        alerts = [
+            a
+            for a in alerts
+            if bool((a.get("extra") or {}).get("super_strict")) == super_strict
         ]
     if unread_only:
         alerts = [a for a in alerts if not a.get("read")]

@@ -131,13 +131,14 @@ const TF_CHIPS = ["", "1m", "5m", "30m", "1h", "2h", "1d"];
 // 与后端 paper_trade.MAX_LOTS 同值：超了服务端只会静默截到 8，先在 App 里拦住给中文提示
 const MAX_MANUAL_LOTS = 8;
 
-// 三个告警页共用一套列表：全部 / 抢跑（半截 K 提醒）/ 严格（高优先级档）
-type AlertMode = "alerts" | "prov" | "strict";
+// 告警页共用一套列表：全部 / 抢跑 / 严格 / 超严格
+type AlertMode = "alerts" | "prov" | "strict" | "super";
 
 const MODE_QUERY: Record<AlertMode, string> = {
   alerts: "",
   prov: "&provisional=1",
   strict: "&strict=1",
+  super: "&super_strict=1",
 };
 
 Notifications.setNotificationHandler({
@@ -488,6 +489,9 @@ function App() {
           <Pressable style={[styles.tab, tab === "strict" ? styles.tabOn : null]} onPress={() => openAlertTab("strict")}>
             <Text style={styles.tabText}>严格</Text>
           </Pressable>
+          <Pressable style={[styles.tab, tab === "super" ? styles.tabOn : null]} onPress={() => openAlertTab("super")}>
+            <Text style={styles.tabText}>超严格</Text>
+          </Pressable>
           <Pressable
             style={[styles.tab, tab === "board" ? styles.tabOn : null]}
             onPress={() => {
@@ -594,7 +598,11 @@ function App() {
                   </Text>
                 ) : alertMode === "strict" ? (
                   <Text style={styles.meta}>
-                    严格＝同一根上再多三道闸（两肩价差÷左肩≤2.5%、形态≥8 根、三段均量递减）的高优先级头肩；同形态的常规告警不重复列出，模拟盘按可用资金一半开仓。
+                    严格＝同一根上多道闸（肩差、形态根数、头比肩/三重量能）的高优先级头肩；同形态的常规告警不重复列出；模拟盘只从严格/超严格开仓。
+                  </Text>
+                ) : alertMode === "super" ? (
+                  <Text style={styles.meta}>
+                    超严格＝严格档再套六条（颈线方向、右肩离颈≤40%头深、肩差等）；只告警+飞书；和严格同形态时严格先占开仓坑。
                   </Text>
                 ) : null
               }
@@ -605,10 +613,12 @@ function App() {
                     : alertMode === "prov"
                       ? "暂无抢跑提醒。日盘 14:45–15:00、夜盘 22:30–23:00 才会产生。"
                       : alertMode === "strict"
-                        ? "暂无严格告警。要同时过肩差、形态根数、三段量能三道闸才会出。"
-                        : tf
-                          ? `「${tf}」周期暂无告警。`
-                          : "暂无告警。新形态出现后会推到这里和通知栏。"}
+                        ? "暂无严格告警。要同时过肩差、形态根数、三重量能等闸才会出。"
+                        : alertMode === "super"
+                          ? "暂无超严格告警。要过严格档 + 六条附加校验才会出。"
+                          : tf
+                            ? `「${tf}」周期暂无告警。`
+                            : "暂无告警。新形态出现后会推到这里和通知栏。"}
                 </Text>
               }
               renderItem={({ item }) => <AlertCard item={item} base={base} />}
