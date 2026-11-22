@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta
@@ -18,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from audit_killed_samples import replay_detail  # noqa: E402
+from build_hits_gallery import build_gallery, render_hits  # noqa: E402
 from core.hs_monitor import TF_CONFIGS, bars_to_strategy_df  # noqa: E402
 from core.kline_store import DURATION_LABELS, TABLE_NAME, connect, load_bars  # noqa: E402
 from replay_winrate import _min_bars, simulate_outcomes, summarize  # noqa: E402
@@ -82,7 +85,9 @@ def _tag_hits(symbol: str, tf: int, bars: list[dict], hits: list[dict]):
             r5_pass.append(h)
         else:
             r5_fail += 1
-    return df, super_hits, r5_pass, r5_fail, r5_pending
+    super_ids = {id(h) for h in super_hits}
+    filtered = [h for h in hits if id(h) not in super_ids]
+    return df, super_hits, r5_pass, r5_fail, r5_pending, filtered
 
 
 def _job(job: tuple[str, int, int]):
@@ -93,18 +98,81 @@ def _job(job: tuple[str, int, int]):
         if len(bars) < _min_bars(tf):
             return tf, symbol, 0, 0, 0, 0, 0, len(bars), [], [], []
         hits = replay_detail(symbol, tf, bars, False, strict_tier=True)
-        df, super_hits, r5_pass, r5_fail, r5_pending = _tag_hits(
+        df, super_hits, r5_pass, r5_fail, r5_pending, filtered = _tag_hits(
             symbol, tf, bars, hits
         )
     finally:
         conn.close()
+    for h in super_hits + filtered:
+        h["symbol"] = symbol
+        h["tf"] = tf
     return (
         tf, symbol, len(hits), len(super_hits), len(r5_pass), r5_fail, r5_pending,
         len(bars),
         simulate_outcomes(symbol, tf, df, hits),
         simulate_outcomes(symbol, tf, df, super_hits),
         simulate_outcomes(symbol, tf, df, r5_pass),
+        super_hits,
+        filtered,
     )
+
+
+def _render_gallery(
+    hits: list[dict],
+    outdir: Path,
+    prefix: str,
+    tag: str,
+    max_n: int,
+    title: str,
+    nav: str,
+) -> None:
+    shutil.rmtree(outdir, ignore_errors=True)
+    outdir.mkdir(parents=True, exist_ok=True)
+    picked = sorted(hits, key=lambda h: h["when"])
+    if max_n:
+        picked = picked[-max_n:]
+    dropped = len(hits) - len(picked)
+    by_tf: dict[int, dict[str, list[dict]]] = {}
+    for h in picked:
+        by_tf.setdefault(int(h["tf"]), {}).setdefault(str(h["symbol"]), []).append(h)
+    dirs: list[Path] = []
+    conn = connect()
+    try:
+        for tf, by_symbol in by_tf.items():
+            label = DURATION_LABELS.get(tf, str(tf))
+            tdir = outdir / label
+            meta: list[dict] = []
+            for symbol, sigs in by_symbol.items():
+                meta.extend(
+                    render_hits(
+                        symbol, tf, sigs, tdir, prefix, conn,
+                        tags={s["when"]: tag for s in sigs},
+                    )
+                )
+            if meta:
+                (tdir / f"meta_{label}.json").write_text(
+                    json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8"
+                )
+                dirs.append(tdir)
+    finally:
+        conn.close()
+    if not dirs:
+        print(f"\n{title}: 无图", flush=True)
+        return
+    labels = "/".join(d.name for d in dirs)
+    n = build_gallery(
+        dirs,
+        True,
+        outdir / "gallery_single.html",
+        (
+            f"{len(hits)} 条，出图 {len(picked)} 张"
+            f"{f'，更早 {dropped} 条未画（加大 --gallery-max）' if dropped else ''}"
+            f" · {labels} · {tag}"
+        ),
+        title=title,
+        nav=nav,
+    )
+    print(f"\n{title}: {n} 张 -> {outdir / 'gallery_single.html'}", flush=True)
 
 
 def main() -> None:
@@ -113,6 +181,13 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--tfs", type=str, default="", help="逗号分隔周期秒，缺省全部监控周期")
     ap.add_argument("--symbols", type=str, default="", help="逗号分隔品种，缺省全主力")
+    ap.add_argument("--gallery", action="store_true", help="渲染命中/被过滤两张画廊")
+    ap.add_argument(
+        "--gallery-max",
+        type=int,
+        default=300,
+        help="每张画廊最多渲染多少张（按时间取最近的，0=全出）",
+    )
     args = ap.parse_args()
 
     tfs = (
@@ -144,6 +219,8 @@ def main() -> None:
     strict_rows: list[dict] = []
     super_rows: list[dict] = []
     r5_rows: list[dict] = []
+    super_all: list[dict] = []
+    filtered_all: list[dict] = []
     by_tf: dict[int, list[int]] = {tf: [0, 0, 0, 0, 0] for tf in tfs}
     skipped: dict[int, int] = {}
     done = 0
@@ -151,7 +228,7 @@ def main() -> None:
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         for (
             tf, _symbol, n_strict, n_super, n_pass, n_fail, n_pending,
-            n_bars, rows_strict, rows_super, rows_r5,
+            n_bars, rows_strict, rows_super, rows_r5, sup_hits, filt_hits,
         ) in ex.map(_job, jobs, chunksize=2):
             done += 1
             if done % 40 == 0:
@@ -167,6 +244,8 @@ def main() -> None:
             strict_rows.extend(rows_strict)
             super_rows.extend(rows_super)
             r5_rows.extend(rows_r5)
+            super_all.extend(sup_hits)
+            filtered_all.extend(filt_hits)
             agg = by_tf[tf]
             agg[0] += n_strict
             agg[1] += n_super
@@ -198,6 +277,19 @@ def main() -> None:
     print(f"  严格: {summarize(strict_rows)}", flush=True)
     print(f"  超严格: {summarize(super_rows)}", flush=True)
     print(f"  +规则5: {summarize(r5_rows)}", flush=True)
+
+    if args.gallery:
+        base = ROOT / "reports" / "backtest_super"
+        _render_gallery(
+            super_all, base / "hits", "super", "超严格命中",
+            args.gallery_max, "超严格命中画廊",
+            '<a href="/backtest/super/filtered">→ 被超严格过滤</a>',
+        )
+        _render_gallery(
+            filtered_all, base / "filtered", "super_filtered", "被超严格过滤",
+            args.gallery_max, "超严格被过滤画廊",
+            '<a href="/backtest/super">← 超严格命中</a>',
+        )
 
 
 if __name__ == "__main__":

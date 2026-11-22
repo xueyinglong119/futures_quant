@@ -305,6 +305,22 @@ def backtest_triple_page() -> FileResponse:
     return FileResponse(page, media_type="text/html")
 
 
+@app.get("/backtest/super")
+def backtest_super_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_super" / "hits" / "gallery_single.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="超严格命中画廊尚未生成（跑 scripts/super_strict_ab.py --gallery）")
+    return FileResponse(page, media_type="text/html")
+
+
+@app.get("/backtest/super/filtered")
+def backtest_super_filtered_page() -> FileResponse:
+    page = ROOT / "reports" / "backtest_super" / "filtered" / "gallery_single.html"
+    if not page.is_file():
+        raise HTTPException(status_code=404, detail="超严格被过滤画廊尚未生成（跑 scripts/super_strict_ab.py --gallery）")
+    return FileResponse(page, media_type="text/html")
+
+
 @app.get("/backtest/prom")
 def backtest_prom_page() -> FileResponse:
     page = ROOT / "reports" / "backtest_prom" / "gallery_single.html"
