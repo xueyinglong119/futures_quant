@@ -56,6 +56,8 @@ STRICT_SIGNALS = os.environ.get("HS_STRICT_SIGNALS", "1") != "0"
 STRICT_HEAD_BOOST = os.environ.get("HS_STRICT_HEAD_BOOST", "0") == "1"
 # 严格档量能：默认三段递减；=1 改用三重同款「第三腿最弱」（顶 v1/v2>v3、底 v1/v2<v3）。
 STRICT_VOL_TRIPLE = os.environ.get("HS_STRICT_VOL_TRIPLE", "0") == "1"
+# 头肩前置趋势（P1 前 20 根收盘回归）：顶只收上升、底只收下降；默认关，A/B 后再定。
+PRE_TREND = os.environ.get("HS_PRE_TREND", "0") == "1"
 # 超严格档：独立告警通道，只提醒不开仓；默认关，A/B 后确认再开。
 SUPER_STRICT = os.environ.get("HS_SUPER_STRICT", "0") == "1"
 
@@ -106,6 +108,9 @@ def make_strategy(duration_sec: int) -> HeadShouldersStrategy:
         min_head_neck_ratio=0.008,
         max_volume=1,
         duration_sec=duration_sec,
+        pre_trend=PRE_TREND,
+        trend_window=20,
+        trend_threshold=0.0002,
         strict_signals=STRICT_SIGNALS,
         strict_head_boost=STRICT_HEAD_BOOST,
         strict_volume_triple=STRICT_VOL_TRIPLE,

@@ -70,11 +70,22 @@ def replay_detail(
         win = df_all.iloc[max(0, i - window) : i + 1]
         sig = scan(win, symbol=symbol)
         if sig is not None:
+            d = getattr(sig, "detail", None) or {}
+            # 假反转只做后验标记（回测含右肩后的 K 线；实盘当根看不到未来，不能当发射闸）
+            if "pattern_kind" not in d and d.get("head") is not None:
+                if d.get("side") == "short":
+                    d["is_fake_reverse"] = float(
+                        df_all["high"].iloc[i:].max()
+                    ) > float(d["head"])
+                else:
+                    d["is_fake_reverse"] = float(
+                        df_all["low"].iloc[i:].min()
+                    ) < float(d["head"])
             out.append(
                 {
                     "when": str(df_all.iloc[i]["datetime"]),
                     "reason": sig.reason,
-                    "detail": getattr(sig, "detail", None) or {},
+                    "detail": d,
                 }
             )
     return out

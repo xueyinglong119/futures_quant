@@ -14,6 +14,7 @@ import pandas as pd
 
 from strategies.base import Signal
 from strategies.head_shoulders import HeadShouldersStrategy, _format_bar_time
+from strategies.trend import pre_trend_ok
 
 TOP = "top"
 BOTTOM = "bottom"
@@ -169,20 +170,13 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         `trend_threshold`（原始点/根会随价格量级失效：2200 的品种 0.0002 点/根
         约等于 0，所有形态都会过，归一化后 0.0002 ≈ 0.02%/根）。
         """
-        closes = klines["close"]
-        y = closes.iloc[max(0, idx1 - self.trend_window) : idx1].to_numpy(
-            dtype="float64"
+        return pre_trend_ok(
+            klines["close"].to_numpy(dtype="float64"),
+            idx1,
+            bottom=bottom,
+            window=self.trend_window,
+            threshold=self.trend_threshold,
         )
-        if y.size < 2:
-            return False
-        x = np.arange(y.size, dtype="float64")
-        slope = float(np.polyfit(x, y, 1)[0])
-        mean = float(np.mean(np.abs(y)))
-        if mean <= 0:
-            return False
-        rel = slope / mean
-        th = self.trend_threshold
-        return rel < -th if bottom else rel > th
 
     def _check_legs(
         self,

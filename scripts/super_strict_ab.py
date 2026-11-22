@@ -29,6 +29,9 @@ from strategies.hs_super_strict import check, pullback_ok  # noqa: E402
 
 
 def _tag_hits(symbol: str, tf: int, bars: list[dict], hits: list[dict]):
+    for h in hits:
+        if (h.get("detail") or {}).get("is_fake_reverse"):
+            h["reason"] = f"{h['reason']} · 假反转"
     df = bars_to_strategy_df(bars)
     win = TF_CONFIGS[tf].lookback_bars
     when_to_i = {str(df.iloc[i]["datetime"]): i for i in range(len(df))}

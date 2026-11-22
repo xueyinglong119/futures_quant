@@ -11,6 +11,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 from strategies.base import Signal
 from strategies.hs_super_strict import check as check_super
+from strategies.trend import pre_trend_ok
 
 _NAN = float("nan")
 
@@ -124,6 +125,9 @@ class HeadShouldersStrategy:
         flat_head_min_bars: int = 4,
         max_shoulder_head_span_ratio: float = 2.5,
         confirmed_shoulders: bool = False,
+        pre_trend: bool = False,
+        trend_window: int = 20,
+        trend_threshold: float = 0.0002,
         strict_signals: bool = False,
         strict_head_boost: bool = False,
         strict_dev_threshold: float = 0.025,
@@ -159,6 +163,9 @@ class HeadShouldersStrategy:
         self.flat_head_min_bars = flat_head_min_bars
         self.max_shoulder_head_span_ratio = max_shoulder_head_span_ratio
         self.confirmed_shoulders = confirmed_shoulders
+        self.pre_trend = pre_trend
+        self.trend_window = trend_window
+        self.trend_threshold = trend_threshold
         self.strict_signals = strict_signals
         self.strict_head_boost = strict_head_boost
         self.strict_dev_threshold = strict_dev_threshold
@@ -782,6 +789,15 @@ class HeadShouldersStrategy:
                     continue
                 if not bottom and price_l >= price_h:
                     self._tr(idx_l, idx_h, -1, "side_l")
+                    continue
+                if self.pre_trend and not pre_trend_ok(
+                    klines["close"].to_numpy(dtype="float64"),
+                    idx_l,
+                    bottom=bottom,
+                    window=self.trend_window,
+                    threshold=self.trend_threshold,
+                ):
+                    self._tr(idx_l, idx_h, -1, "pre_trend")
                     continue
                 # 只依赖 (li, hi) 的量在外层算一次，ri 循环里只查表
                 neck_l = self._reaction_neck(

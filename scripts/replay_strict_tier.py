@@ -64,12 +64,20 @@ def replay(symbol: str, duration_sec: int, bars: list[dict]):
         s = strat.on_bar_strict(win_df, symbol=symbol)
         if s is not None:
             pid = str((s.detail or {}).get("pattern_id"))
+            d = s.detail or {}
+            fake = False
+            if d.get("head") is not None:
+                if d.get("side") == "short":
+                    fake = float(df["high"].iloc[i:].max()) > float(d["head"])
+                else:
+                    fake = float(df["low"].iloc[i:].min()) < float(d["head"])
+                d["is_fake_reverse"] = bool(fake)
             strict.append(
                 {
                     "when": str(df.iloc[i]["datetime"]),
                     "pattern_id": pid,
-                    "reason": s.reason,
-                    "detail": s.detail or {},
+                    "reason": s.reason + (" · 假反转" if fake else ""),
+                    "detail": d,
                     "mark": "同形态让位" if pid in normal_pat else "严格档独占",
                 }
             )
