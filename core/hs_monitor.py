@@ -135,6 +135,8 @@ def make_triple_strategy(duration_sec: int) -> TriplePatternStrategy:
         time_dev_threshold=0.5,
         time_filter=False,
         trend_filter=TRIPLE_TREND,
+        trend_window=20,
+        trend_threshold=0.0002,
         extreme_filter=TRIPLE_EXTREME,
         strict_pulse_filter=True,
         strict_pulse_multiple=3.0,

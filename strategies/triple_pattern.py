@@ -38,9 +38,11 @@ class TriplePatternStrategy(HeadShouldersStrategy):
     当根单量、或「当根单量逐次排 + 当根 MACD 柱逐次下降」；
     ⑦ 形态高度三件套——≥ `min_head_neck_points` 价点、≥ `min_head_neck_ratio` 比例、
     三个极值逐个离颈线 ≥ `shoulder_prominence_ratio`×高度；
-    ⑧ 趋势方向（`trend_filter`，默认关，回测 A/B 用）——「趋势末端」的另一半：顶必须
-    从上涨里来（P1 收盘高于等长前一段），底必须从下跌里来。没有这一闸时，暴跌后的
-    横盘箱体里那组等高的**反弹高点**会被当成三重顶，实际上它是底部的颈线。
+    ⑧ 趋势方向（`trend_filter`，默认关，回测 A/B 用）——「趋势末端」的另一半：取 P1
+    之前 `trend_window=20` 根收盘做线性回归，`斜率/均价` 为相对趋势；顶只收
+    `> trend_threshold` 的上升，底只收 `< -trend_threshold` 的下降，震荡直接拒。
+    没有这一闸时，暴跌后的横盘箱体里那组等高的**反弹高点**会被当成三重顶，实际上
+    它是底部的颈线。
     ⑨ 区间位置（`extreme_filter`，默认关，回测 A/B 用）——三个极值必须是回看
     `max_span_bars` 根内的最高/最低（容差仍是 `0.25×height`）。它比 ⑧ 直接：暴跌/
     暴涨后的箱体离前高/前低太远，直接拒掉，不靠单点收盘猜趋势。
@@ -57,6 +59,8 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         time_dev_threshold: float = 0.5,
         time_filter: bool = False,
         trend_filter: bool = False,
+        trend_window: int = 20,
+        trend_threshold: float = 0.0002,
         extreme_filter: bool = False,
         macd_fast: int = 12,
         macd_slow: int = 26,
@@ -70,6 +74,8 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         self.time_dev_threshold = time_dev_threshold
         self.time_filter = time_filter
         self.trend_filter = trend_filter
+        self.trend_window = trend_window
+        self.trend_threshold = trend_threshold
         self.extreme_filter = extreme_filter
         self.macd_fast = macd_fast
         self.macd_slow = macd_slow
@@ -157,19 +163,26 @@ class TriplePatternStrategy(HeadShouldersStrategy):
     def _trend_ok(
         self, klines: pd.DataFrame, idx1: int, idx3: int, bottom: bool
     ) -> bool:
-        """趋势末端：顶从上涨里来、底从下跌里来。
+        """趋势末端：顶必须从上升里来、底必须从下降里来；震荡直接拒。
 
-        拿进入形态前**同等长度**那一段的收盘作参照（P1 往前 `P3−P1` 根），不引入新参数。
-        数据不够就看不了趋势，放行由后面的几何闸决定。
+        取 P1 之前 `trend_window` 根收盘做线性回归；斜率按**均价归一化**后再比
+        `trend_threshold`（原始点/根会随价格量级失效：2200 的品种 0.0002 点/根
+        约等于 0，所有形态都会过，归一化后 0.0002 ≈ 0.02%/根）。
         """
-        span = idx3 - idx1
-        prior_idx = idx1 - span
-        if span <= 0 or prior_idx < 0:
-            return True
         closes = klines["close"]
-        prior = float(closes.iloc[prior_idx])
-        cur = float(closes.iloc[idx1])
-        return cur < prior if bottom else cur > prior
+        y = closes.iloc[max(0, idx1 - self.trend_window) : idx1].to_numpy(
+            dtype="float64"
+        )
+        if y.size < 2:
+            return False
+        x = np.arange(y.size, dtype="float64")
+        slope = float(np.polyfit(x, y, 1)[0])
+        mean = float(np.mean(np.abs(y)))
+        if mean <= 0:
+            return False
+        rel = slope / mean
+        th = self.trend_threshold
+        return rel < -th if bottom else rel > th
 
     def _check_legs(
         self,
