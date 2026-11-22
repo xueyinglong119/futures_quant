@@ -100,7 +100,7 @@ def in_trading_window(now: datetime) -> bool:
     wd = now.weekday()  # 周一=0 … 周日=6
     hm = now.hour * 60 + now.minute
     if hm >= 20 * 60 + 58:
-        return wd in (6, 0, 1, 2, 3, 4)  # 周日到周五夜盘
+        return wd in (0, 1, 2, 3, 4)  # 周一到周五夜盘；周日晚没有行情
     if hm <= 2 * 60 + 40:
         return wd in (0, 1, 2, 3, 4, 5)  # 夜盘延续到次日凌晨，含周六凌晨
     if wd > 4:
