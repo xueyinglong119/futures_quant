@@ -46,8 +46,28 @@ type AlertItem = {
     duration_sec?: number;
     provisional?: boolean;
     strict?: boolean;
+    conflict?: boolean;
+    tf_conflict?: TfConflict;
     detail?: HsDetail;
   };
+};
+
+// 服务端 core/tf_conflict.py 的 verdict：action 是 allow / downgrade / block
+type TfConflictLarge = {
+  duration_sec?: number;
+  pattern?: string;
+  direction?: string;
+  head?: number;
+  neck?: number;
+  status?: string;
+  breakout?: boolean;
+};
+
+type TfConflict = {
+  action?: string;
+  weight?: number;
+  reason?: string;
+  large?: TfConflictLarge[];
 };
 
 type ExecutionTrade = {
@@ -131,14 +151,24 @@ const TF_CHIPS = ["", "1m", "5m", "30m", "1h", "2h", "1d"];
 // 与后端 paper_trade.MAX_LOTS 同值：超了服务端只会静默截到 8，先在 App 里拦住给中文提示
 const MAX_MANUAL_LOTS = 8;
 
-// 告警页共用一套列表：全部 / 抢跑 / 严格 / 超严格
-type AlertMode = "alerts" | "prov" | "strict" | "super";
+// 告警页共用一套列表：全部 / 抢跑 / 严格 / 超严格 / 冲突
+type AlertMode = "alerts" | "prov" | "strict" | "super" | "conf";
 
 const MODE_QUERY: Record<AlertMode, string> = {
   alerts: "",
   prov: "&provisional=1",
   strict: "&strict=1",
   super: "&super_strict=1",
+  conf: "&conflict=1",
+};
+
+const TF_TEXT: Record<number, string> = {
+  60: "1m",
+  300: "5m",
+  1800: "30m",
+  3600: "1h",
+  7200: "2h",
+  86400: "1d",
 };
 
 Notifications.setNotificationHandler({
@@ -316,7 +346,7 @@ function barCloseText(barTime: string, durationSec?: number): string {
 }
 
 function App() {
-  const [tab, setTab] = useState<"alerts" | "prov" | "strict" | "board" | "settings">("alerts");
+  const [tab, setTab] = useState<AlertMode | "board" | "settings">("alerts");
   const [apiBase, setApiBase] = useState(DEFAULT_API);
   const [apiInput, setApiInput] = useState(DEFAULT_API);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
@@ -492,6 +522,9 @@ function App() {
           <Pressable style={[styles.tab, tab === "super" ? styles.tabOn : null]} onPress={() => openAlertTab("super")}>
             <Text style={styles.tabText}>超严格</Text>
           </Pressable>
+          <Pressable style={[styles.tab, tab === "conf" ? styles.tabOn : null]} onPress={() => openAlertTab("conf")}>
+            <Text style={styles.tabText}>冲突</Text>
+          </Pressable>
           <Pressable
             style={[styles.tab, tab === "board" ? styles.tabOn : null]}
             onPress={() => {
@@ -604,6 +637,10 @@ function App() {
                   <Text style={styles.meta}>
                     超严格＝严格档再套六条（颈线方向、右肩离颈≤40%头深、肩差等）；只告警+飞书；和严格同形态时严格先占开仓坑。
                   </Text>
+                ) : alertMode === "conf" ? (
+                  <Text style={styles.meta}>
+                    冲突＝小周期形态压在大周期反向形态里。降权＝大形态还没破颈线，仍会开仓；禁止开仓＝大形态已确认突破，模拟盘那笔已拦下，另发一条超严重告警并推飞书。
+                  </Text>
                 ) : null
               }
               ListEmptyComponent={
@@ -616,9 +653,11 @@ function App() {
                         ? "暂无严格告警。要同时过肩差、形态根数、三重量能等闸才会出。"
                         : alertMode === "super"
                           ? "暂无超严格告警。要过严格档 + 六条附加校验才会出。"
-                          : tf
-                            ? `「${tf}」周期暂无告警。`
-                            : "暂无告警。新形态出现后会推到这里和通知栏。"}
+                          : alertMode === "conf"
+                            ? "暂无周期冲突。要小周期反向形态正好落在大周期形态区间内才会出。"
+                            : tf
+                              ? `「${tf}」周期暂无告警。`
+                              : "暂无告警。新形态出现后会推到这里和通知栏。"}
                 </Text>
               }
               renderItem={({ item }) => <AlertCard item={item} base={base} />}
@@ -628,6 +667,26 @@ function App() {
       )}
     </SafeAreaView>
   );
+}
+
+// 周期冲突文案：block 是模拟盘已被拦下，downgrade 只是大周期压着、仍会开仓
+function conflictText(cf: TfConflict): string {
+  const act =
+    cf.action === "block"
+      ? "周期冲突 · 禁止开仓"
+      : cf.action === "downgrade"
+        ? "周期冲突 · 降权观察"
+        : `周期冲突 · ${cf.action ?? ""}`;
+  const w = typeof cf.weight === "number" ? ` 权重 ${cf.weight.toFixed(2)}` : "";
+  const larges = (cf.large ?? [])
+    .map(
+      (l) =>
+        `${TF_TEXT[l.duration_sec ?? 0] ?? String(l.duration_sec ?? "")}${
+          l.pattern === "head_shoulder_bottom" ? "头肩底" : "头肩顶"
+        }·${l.status === "confirmed" ? "已确认" : "候选"}`
+    )
+    .join(" / ");
+  return larges ? `${act}${w} · 大周期：${larges}` : `${act}${w}`;
 }
 
 function AlertCard({ item, base }: { item: AlertItem; base: string }) {
@@ -734,6 +793,17 @@ function AlertCard({ item, base }: { item: AlertItem; base: string }) {
         </Text>
         <Text style={styles.alertTime}>发现时间 {item.created_at}</Text>
         <Text style={styles.alertReason}>{item.reason}</Text>
+        {item.extra?.tf_conflict ? (
+          <Text
+            style={
+              item.extra.tf_conflict.action === "block"
+                ? styles.conflictBlock
+                : styles.conflictWarn
+            }
+          >
+            {conflictText(item.extra.tf_conflict)}
+          </Text>
+        ) : null}
         <Text style={styles.detailHint}>{open ? "收起执行详情 ▲" : "查看执行详情 ▼"}</Text>
       </Pressable>
       {open ? (
@@ -1024,6 +1094,8 @@ const styles = StyleSheet.create({
   alertCode: { color: "#7A8B9A", marginTop: 2, fontSize: 11 },
   alertTime: { color: "#9BB0C1", marginTop: 4, fontSize: 12 },
   alertReason: { color: "#D7E0E8", marginTop: 8, lineHeight: 20 },
+  conflictBlock: { color: "#FF8A8A", backgroundColor: "#3A1420", borderWidth: 1, borderColor: "#7A2B3A", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, marginTop: 8, fontSize: 12, fontWeight: "700" },
+  conflictWarn: { color: "#E8B86D", backgroundColor: "#33291A", borderWidth: 1, borderColor: "#6B5327", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 5, marginTop: 8, fontSize: 12 },
   detailHint: { color: "#E8B86D", marginTop: 8, fontSize: 12, fontWeight: "600" },
   chartImg: {
     width: "100%",

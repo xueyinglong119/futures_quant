@@ -105,12 +105,14 @@ def list_alerts(
     provisional: bool | None = None,
     strict: bool | None = None,
     super_strict: bool | None = None,
+    conflict: bool | None = None,
     include_superseded: bool = False,
 ) -> list[dict[str, Any]]:
     """`duration` 是周期标签（如 "5m"），只按 `extra.duration` 精确过滤。
 
     `provisional` 为 True 只要收盘前的抢跑告警，False 只要已收线的，None 不限。
     `strict` 同理，按 `extra.strict` 过滤严格档。
+    `conflict` 按 `extra.conflict` 过滤周期冲突（降权的原告警 + 超严重那条都在内）。
     """
     with _LOCK:
         data = _load()
@@ -139,6 +141,8 @@ def list_alerts(
             for a in alerts
             if bool((a.get("extra") or {}).get("super_strict")) == super_strict
         ]
+    if conflict is not None:
+        alerts = [a for a in alerts if bool((a.get("extra") or {}).get("conflict")) == conflict]
     if unread_only:
         alerts = [a for a in alerts if not a.get("read")]
     return alerts[: max(1, min(limit, 200))]

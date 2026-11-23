@@ -487,6 +487,7 @@ def api_list_alerts(
     provisional: bool | None = Query(None),
     strict: bool | None = Query(None),
     super_strict: bool | None = Query(None),
+    conflict: bool | None = Query(None),
 ) -> dict[str, Any]:
     items = list_alerts(
         limit=limit,
@@ -495,6 +496,7 @@ def api_list_alerts(
         provisional=provisional,
         strict=strict,
         super_strict=super_strict,
+        conflict=conflict,
     )
     for item in items:
         symbol = str(item.get("symbol") or "")

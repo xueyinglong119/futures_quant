@@ -26,6 +26,9 @@
   .detail .note { color: #9BB0C1; font-size: 12px; }
   .detail .line { margin-top: 4px; }
   .up { color: #FF6B6B; } .down { color: #3DDC97; }
+  .conflict { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 13px; }
+  .conflict.block { background: #3A1420; color: #FF8A8A; border: 1px solid #7A2B3A; font-weight: 600; }
+  .conflict.downgrade { background: #33291A; color: #E8B86D; border: 1px solid #6B5327; }
   .empty { color: #9BB0C1; text-align: center; padding: 40px 0; }
 </style>
 </head>
@@ -43,8 +46,8 @@ const list = document.getElementById("list");
 const openSet = new Set();
 const detailCache = new Map();
 
-// 与 App 三页同参：?provisional=1 抢跑、?strict=1 严格、&duration=30m、&unread_only=1
-const FILTER_KEYS = ["provisional", "strict", "duration", "unread_only"];
+// 与 App 各页同参：?provisional=1 抢跑、?strict=1 严格、?super=1 超严格、?conflict=1 周期冲突、&duration=30m、&unread_only=1
+const FILTER_KEYS = ["provisional", "strict", "super_strict", "conflict", "duration", "unread_only"];
 const params = new URLSearchParams(location.search);
 const query = new URLSearchParams();
 for (const key of FILTER_KEYS) {
@@ -52,7 +55,9 @@ for (const key of FILTER_KEYS) {
   if (v) query.set(key, v);
 }
 const modeLabel = params.get("provisional") === "1" ? "抢跑"
-  : params.get("strict") === "1" ? "严格" : "";
+  : params.get("strict") === "1" ? "严格"
+  : params.get("super_strict") === "1" ? "超严格"
+  : params.get("conflict") === "1" ? "周期冲突" : "";
 if (modeLabel) {
   document.querySelector("header .sub").textContent = `${modeLabel}档 · 形态K线图 · 执行详情`;
 }
@@ -62,6 +67,18 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => (
 ));
 const money = (v) => (v === null || v === undefined ? "—" : Number(v).toFixed(2));
 const pnlCls = (v) => (v === null || v === undefined || v === 0 ? "" : (v > 0 ? "up" : "down"));
+
+const TF_LABEL = { 60: "1m", 300: "5m", 1800: "30m", 3600: "1h", 7200: "2h", 86400: "1d" };
+const ACTION_TEXT = { block: "禁止开仓", downgrade: "降权观察", allow: "放行" };
+
+function conflictLine(cf) {
+  if (!cf || !cf.action) return "";
+  const larges = (cf.large || [])
+    .map((l) => `${TF_LABEL[l.duration_sec] || l.duration_sec}${l.pattern === "head_shoulder_bottom" ? "头肩底" : "头肩顶"}·${l.status === "confirmed" ? "已确认" : "候选"}`)
+    .join(" / ");
+  const w = typeof cf.weight === "number" ? ` 权重 ${cf.weight.toFixed(2)}` : "";
+  return `<div class="conflict ${esc(cf.action)}">周期冲突 · ${esc(ACTION_TEXT[cf.action] || cf.action)}${esc(w)}${larges ? ` · 大周期：${esc(larges)}` : ""}</div>`;
+}
 
 async function load() {
   const qs = query.toString();
@@ -85,6 +102,7 @@ function card(item) {
     <div class="code">${esc(extra.code || item.symbol)}</div>
     <div class="time">K线时间 ${esc(item.bar_time)}　发现时间 ${esc(item.created_at)}</div>
     <div class="reason">${esc(item.reason)}</div>
+    ${conflictLine(extra.tf_conflict)}
     <img class="chart" loading="lazy" src="/api/alerts/${encodeURIComponent(item.id)}/chart.png" alt="形态K线图">
     <div class="nochart" hidden>该告警无可用形态图</div>
     <div><button class="ghost toggle">查看执行详情 ▼</button></div>

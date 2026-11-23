@@ -20,10 +20,12 @@ from core.cont_symbols import drop_illiquid, list_commodity_mains
 from core.hs_fanout import HsFanout, KeyResult, detect_one
 from core.hs_monitor import (
     HS_MONITOR_DURATIONS,
+    LARGER_MAP,
     PROVISIONAL_DURATIONS,
     HsMonitorEngine,
     alert_tag,
     in_provisional_window,
+    load_tf_df,
     tier_dets,
 )
 from core.kline_store import (
@@ -40,6 +42,7 @@ from core.realtime_pipeline import (
     in_trading_window,
     session_bar_open,
 )
+from core.tf_conflict import PROBE_BARS, TF_CONFLICT, ConflictJudge
 
 POLL_SEC = 0.5
 IDLE_SEC = 15.0
@@ -60,6 +63,14 @@ class DbHsMonitor:
         # 抢跑专用引擎：半截 K 的结构、`_traded_patterns` 都不能碰正式路径那套实例。
         # 它的 on_signal 永远是 None —— 抢跑只提醒，不开仓。
         self.prov_engine = HsMonitorEngine()
+        # 大小周期冲突探针：只在父进程挂（分片 worker 不做副作用），两个引擎共用一份
+        # 大周期形态缓存。判到 block 会拦住严格档/超严格的模拟盘开仓。
+        self.conn = None
+        self.conflict_judge: ConflictJudge | None = None
+        if TF_CONFLICT:
+            self.conflict_judge = ConflictJudge(LARGER_MAP, self._load_tf_df)
+            self.engine.conflict_judge = self.conflict_judge
+            self.prov_engine.conflict_judge = self.conflict_judge
         # 子进程在 run_forever 里、api 与库都起来之后才拉起（见那里）。
         self.fanout: HsFanout | None = None
         self.broker: PaperBroker | None = None
@@ -72,6 +83,7 @@ class DbHsMonitor:
         api = TqApi(auth=TqAuth(cfg.auth.user, cfg.auth.password))
         conn = connect()
         ensure_table(conn)
+        self.conn = conn
         self.engine.on_signal = None
         try:
             # 分片 worker 在 HsFanout 构造时就 spawn，所以必须等 api 和库都起来之后再拉：
@@ -95,6 +107,15 @@ class DbHsMonitor:
                 "（只读库，不订 K 线）",
                 flush=True,
             )
+            if self.conflict_judge is None:
+                print("[monitor] 周期冲突判定未启用（HS_TF_CONFLICT=1 才开）", flush=True)
+            else:
+                pairs = sum(len(v) for v in LARGER_MAP.values())
+                print(
+                    f"[monitor] 周期冲突判定已启用 大周期配对={pairs} "
+                    f"探针={PROBE_BARS}根 拦截=block不开仓",
+                    flush=True,
+                )
             while True:
                 now = datetime.now(TZ)
                 if not in_trading_window(now):
@@ -117,14 +138,22 @@ class DbHsMonitor:
                     except Exception:
                         conn.close()
                         conn = connect()
+                        self.conn = conn
                         if self.broker is not None:
                             self.broker.conn = conn
                 time.sleep(self.poll_sec)
         finally:
             if self.fanout is not None:
                 self.fanout.close()
+            self.conn = None
             conn.close()
             api.close()
+
+    def _load_tf_df(self, symbol: str, duration_sec: int):
+        """冲突探针取大周期历史：有在用的连接就复用，别为一次判定单开一条。"""
+        if self.conn is None:
+            return load_tf_df(symbol, duration_sec)
+        return load_tf_df(symbol, duration_sec, conn=self.conn)
 
     def _symbols(self, conn, api: TqApi) -> list[str]:
         try:

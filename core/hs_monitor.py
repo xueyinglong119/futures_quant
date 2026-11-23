@@ -27,6 +27,7 @@ from core.kline_store import (
     load_bars,
 )
 from core.push_notify import send_alert_push
+from core.tf_conflict import BLOCK, TF_CONFLICT
 from strategies.head_shoulders import HeadShouldersStrategy
 from strategies.triple_pattern import TriplePatternStrategy
 from utils.symbols import get_display_name
@@ -40,6 +41,14 @@ HS_MONITOR_DURATIONS: tuple[int, ...] = (
     DURATION_2H,
     DURATION_1D,
 )
+
+# 周期冲突（用户 2026-11-23 规格）：每条信号都要看它上面所有更大的周期，取最坏结论
+LARGER_MAP: dict[int, tuple[int, ...]] = {
+    dur: tuple(sorted(bigger for bigger in HS_MONITOR_DURATIONS if bigger > dur))
+    for dur in HS_MONITOR_DURATIONS
+}
+# 冲突判定结果按形态记账的上限，超了就整表清一次（长持进程别把 verdict 里的点位堆爆）
+_CONFLICT_CACHE_MAX = 5000
 
 # 收盘前抢跑：日盘 14:45、夜盘 22:30 之后，最后几根会话 K 还是半截的。
 # 这段时间用未收线的半截 K 提前提醒右肩，免得等到 15:00/23:00 收线才告警已经买不到。
@@ -232,6 +241,8 @@ def emit_alert(
     strict: bool = False,
     triple: bool = False,
     super_strict: bool = False,
+    conflict: dict[str, Any] | None = None,
+    conflict_severe: bool = False,
 ) -> str | None:
     """写告警并推送，返回告警 id，供模拟账户把这笔单和告警对上。"""
     label = DURATION_LABELS.get(duration_sec, str(duration_sec))
@@ -270,11 +281,17 @@ def emit_alert(
         extra["strict"] = True
     if super_strict:
         extra["super_strict"] = True
+    if conflict:
+        # App 的「冲突」页按 extra.conflict 取，具体档位读 extra.tf_conflict.action
+        extra["conflict"] = True
+        extra["tf_conflict"] = conflict
     pattern_id = str((detail or {}).get("pattern_id") or "")
     # 顶掉用的键必须带上品种和周期：pattern_id 只由三根 K 线时刻组成，不同品种会同名
     pattern_key = f"{symbol}|{duration_sec}|{pattern_id}" if pattern_id else None
-    if pattern_key:
-        # 两档对同一形态的记账键，严格档用它找到自己的常规档那条再顶掉
+    if pattern_key and not conflict_severe:
+        # 两档对同一形态的记账键，严格档用它找到自己的常规档那条再顶掉。
+        # 超严重那条带的是被拦形态的 detail，不能也挂这个键——否则后来的严格档会按
+        # `add_alert(supersedes=)` 把冲突卡当成「同形态的常规档」打上 superseded 藏掉。
         extra["pattern"] = pattern_key
     if detail:
         extra["detail"] = detail
@@ -298,8 +315,8 @@ def emit_alert(
                     print(f"App推送结果: {push_result}", flush=True)
                 except Exception as exc:  # noqa: BLE001
                     print(f"App推送失败: {exc}", flush=True)
-                if strict or triple or provisional or super_strict:
-                    # App 被系统杀掉就收不到轮询，严格档、三重与抢跑另走飞书（亮屏交给飞书自己的保活）
+                if strict or triple or provisional or super_strict or conflict_severe:
+                    # App 被系统杀掉就收不到轮询，严格档、三重、抢跑、超严格与周期冲突另走飞书（亮屏交给飞书自己的保活）
                     # 带墙钟和卡片身份：监控日志没有逐行时间，排限流/丢卡时只能靠这些行去对
                     stamp = datetime.now().strftime("%m-%d %H:%M:%S")
                     who = f"{alert.kind} {alert.symbol} {alert.bar_time}"
@@ -328,6 +345,7 @@ class Detection:
     strict: bool = False
     triple: bool = False
     super_strict: bool = False
+    conflict: dict[str, Any] | None = None
 
 
 def _pattern_of(det: Detection) -> str:
@@ -350,12 +368,32 @@ def tier_dets(strict: Detection | None, normal: Detection | None) -> list[Detect
 def alert_tag(det: Detection) -> str:
     """日志前缀：让严格档、超严格、三重通道和普通头肩在监控输出里一眼分开。"""
     if det.super_strict:
-        return "超严格告警"
-    if det.strict:
-        return "严格告警"
-    if det.triple:
-        return "三重告警"
-    return "告警"
+        base = "超严格告警"
+    elif det.strict:
+        base = "严格告警"
+    elif det.triple:
+        base = "三重告警"
+    else:
+        base = "告警"
+    if det.conflict and det.conflict.get("conflict"):
+        return f"{base}·冲突禁止" if det.conflict.get("action") == BLOCK else f"{base}·冲突降权"
+    return base
+
+
+# 超严重那条告警的 kind：带「冲突」二字，飞书自定义关键词要靠它放行
+CONFLICT_KIND = "周期冲突·超严重"
+
+
+def conflict_prefix(verdict: dict[str, Any]) -> str:
+    """被压住的那条原告警的 reason 前缀，列表里不用展开就能看出档位。"""
+    word = "禁止开仓" if verdict.get("action") == BLOCK else "降权观察"
+    return f"[周期冲突·{word}] "
+
+
+def conflict_reason(det: Detection, verdict: dict[str, Any]) -> str:
+    label = DURATION_LABELS.get(det.duration_sec, str(det.duration_sec))
+    n = len(verdict.get("large") or [])
+    return f"{det.kind}({label}) 撞 {n} 条大周期反向形态 → {verdict.get('reason')}"
 
 
 class HsMonitorEngine:
@@ -367,6 +405,11 @@ class HsMonitorEngine:
         self._last_bar_dt: dict[str, datetime] = {}
         self._last_triple_dt: dict[str, datetime] = {}
         self._alerted: set[str] = set()
+        self._conflict_alerted: set[str] = set()
+        self._conflict_cache: dict[str, dict[str, Any] | None] = {}
+        # 大小周期冲突探针（`core.tf_conflict.ConflictJudge`）。只在父进程挂：
+        # 分片 worker 不碰副作用，挂上去会每个 worker 各查一遍库。
+        self.conflict_judge: Any | None = None
         self.on_signal: Callable[[str, int, datetime, pd.DataFrame, Any], None] | None = None
 
     def _key(self, symbol: str, duration_sec: int) -> str:
@@ -552,6 +595,65 @@ class HsMonitorEngine:
             last_dt = last_dt.replace(tzinfo=None)
         return last_dt.replace(microsecond=0)
 
+    def conflict_of(self, det: Detection) -> dict[str, Any] | None:
+        """这条信号是否压在大周期的反向形态里。同 (品种, 周期, 形态, K线时刻) 只探一次。
+
+        三重不参与（用户 2026-11-23 裁决：只头肩顶/底）。空 dict 表示探过但大周期上
+        没有活着的反向形态，用它占位避免同一根反复打库。
+        """
+        judge = self.conflict_judge
+        if judge is None or det.triple:
+            return None
+        key = f"{det.symbol}|{det.duration_sec}|{_pattern_of(det)}|{det.last_dt.isoformat()}"
+        if key in self._conflict_cache:
+            cached = self._conflict_cache[key]
+        else:
+            if len(self._conflict_cache) > _CONFLICT_CACHE_MAX:
+                self._conflict_cache.clear()
+            try:
+                cached = judge(
+                    det.symbol,
+                    det.duration_sec,
+                    getattr(det.signal, "detail", None) or {},
+                    det.last_dt,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[monitor] 周期冲突判定失败 {det.symbol}/{det.duration_sec}: {exc}", flush=True)
+                cached = None
+            self._conflict_cache[key] = cached or {}
+        return cached or None
+
+    def emit_conflict_alert(
+        self,
+        det: Detection,
+        verdict: dict[str, Any],
+        *,
+        alert_log: Path | None = None,
+        push: bool = True,
+        toast: bool = False,
+    ) -> int:
+        """超严重的周期冲突告警：独立一条，与被它压住的那条分开，一个形态只出一条。"""
+        key = f"{det.symbol}|{det.duration_sec}|{_pattern_of(det)}|{det.last_dt.isoformat()}"
+        if key in self._conflict_alerted:
+            return 0
+        if len(self._conflict_alerted) > _CONFLICT_CACHE_MAX:
+            self._conflict_alerted.clear()
+        self._conflict_alerted.add(key)
+        emit_alert(
+            symbol=det.symbol,
+            duration_sec=det.duration_sec,
+            kind=CONFLICT_KIND,
+            when=det.last_dt,
+            reason=conflict_reason(det, verdict),
+            detail=getattr(det.signal, "detail", None),
+            alert_log=alert_log,
+            push=push,
+            toast=toast,
+            conflict=verdict,
+            conflict_severe=True,
+        )
+        return 1
+
     def deliver(
         self,
         det: Detection,
@@ -566,18 +668,30 @@ class HsMonitorEngine:
 
         严格档那条还会把同 (品种, 周期, 形态) 的**已在库**常规档记录（含抢跑那一条）
         打上 superseded；同刻一起出的常规档在 `tier_dets` 里直接不发。
+
+        挂了周期冲突探针时：冲突的告警带 `extra.tf_conflict` 与 reason 前缀，
+        判到 block 的那条**不开模拟盘仓**并另发一条超严重冲突告警（抢跑只标记，
+        半截 K 本来就不开仓，重复发卡没有意义）。
         """
         key = self._key(det.symbol, det.duration_sec)
         alert_key = f"{key}|{det.kind}|{det.last_dt.isoformat()}|{det.signal.reason}"
         if alert_key in self._alerted:
             return 0
         self._alerted.add(alert_key)
+        verdict = self.conflict_of(det)
+        conflicted = bool(verdict) and bool(verdict.get("conflict"))
+        blocked = bool(verdict) and verdict.get("action") == BLOCK
+        # 每次都覆写：Detection 可能被另一个没挂探针的引擎再发一次，不能留上一次的结论
+        det.conflict = verdict if conflicted else None
+        reason = det.signal.reason
+        if conflicted:
+            reason = f"{conflict_prefix(verdict)}{reason}"
         alert_id = emit_alert(
             symbol=det.symbol,
             duration_sec=det.duration_sec,
             kind=det.kind,
             when=det.last_dt,
-            reason=det.signal.reason,
+            reason=reason,
             detail=getattr(det.signal, "detail", None),
             alert_log=alert_log,
             push=push,
@@ -586,8 +700,21 @@ class HsMonitorEngine:
             strict=det.strict,
             triple=det.triple,
             super_strict=det.super_strict,
+            conflict=det.conflict,
         )
-        if trade and self.on_signal is not None:
+        emitted = 0
+        if blocked and not provisional:
+            emitted = self.emit_conflict_alert(
+                det, verdict, alert_log=alert_log, push=push, toast=toast
+            )
+        if blocked and trade:
+            label = DURATION_LABELS.get(det.duration_sec, str(det.duration_sec))
+            print(
+                f"[monitor] 周期冲突拦住开仓 {det.symbol} {label} {det.kind} "
+                f"@ {det.last_dt:%Y-%m-%d %H:%M}",
+                flush=True,
+            )
+        if trade and not blocked and self.on_signal is not None:
             try:
                 self.on_signal(
                     det.symbol,
@@ -599,7 +726,7 @@ class HsMonitorEngine:
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"[paper] 开仓处理失败 {det.symbol}: {exc}", flush=True)
-        return 1
+        return 1 + emitted
 
     def evaluate_df(
         self,

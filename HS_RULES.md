@@ -114,6 +114,34 @@
 
 **CPU 代价（本机微基准，随机游走 400 根滑窗、每根重扫一次）**：1m 头肩 9.27 ms + 三重 1.48 ms、5m 13.34 + 1.39、30m 29.98 + 1.50 → 这条通道只加 **5%~16%**，不是严格档那种"策略侧翻倍"。原因：三重的 `Dev(P2,P1)` / `Dev(P3,P1)` 在候选循环最外层就 `continue` 掉绝大多数组合，而头肩的开销在 `_best_break` 那三层 `li/hi/ri` 循环加 strict 主导性判定。
 
+### 周期冲突（大小周期嵌套反向，2026-11-23 用户规格，默认关）
+
+**要解决的问题**：小周期头肩顶出告警时，同品种的大周期可能正压着一个反向的头肩底——逆大周期开仓。代码 `core/tf_conflict.py`，接线在 `core/hs_monitor.py` 的 `deliver`（发射前判一次），开关 `HS_TF_CONFLICT`（默认 `0`）。
+
+**口径（用户 2026-11-23 四条拍板）**
+
+| 项 | 现口径 |
+|----|--------|
+| 大周期范围 | 该信号周期之上**所有**更大周期（`LARGER_MAP`，`core/hs_monitor.py:47`：30m 看 1h/2h/1d），逐条判后**取最坏结论**（block > downgrade > allow，同档取权重更小） |
+| 大形态来源 | **只头肩顶/底**，三重不参与（`_state_of` 见 `pattern_kind` 直接返回 None） |
+| block 的处理 | **拦住模拟盘开仓**（`deliver` 里 `trade and not blocked` 才喂 `on_signal`）+ 另发一条超严重告警。这条动到 11-22 定稿的「严格/超严格才开仓」，所以整条通道默认关，先跑 §3 的影响回放 |
+| 判定表顺序 | 规格 A–G **原样实现，不调整**：D（小形态未破颈 → downgrade 0.4）排在 E/F 之前 |
+
+**规格里两处歧义的取法**（都按「让用户给的生猪示例成立」定，示例本身算出来是 `downgrade / 0.4`，已进自检）
+
+1. **区间嵌套不能用下标**：小/大周期的 `idx` 是各自周期的根数，跨周期比下标无意义 ⇒ 一律换成 **K 线时刻**比。且大形态区间取 `[左肩时刻, 大周期当前根]` 而**不是** `[左肩, 右肩]`：颈线突破必然发生在右肩之后，若把终点钉在右肩，C 分支（大形态已确认 → block）永远走不到。库内标签的口径差（raw=起始、会话=结束）两边同向，不影响包含判断。
+2. **`status` 与 `breakout_confirmed` 合并成一个事实**：右肩之后收盘越过颈线即同时是 confirmed 与 breakout，没越就是 candidate。规格里这两个字段在 C 分支里是 AND，等价于一条。
+
+**E/F 是死分支（按规格原样保留，用户 11-23 裁决不改）**：E/F 在 D 之后，而 D 的条件是「小形态未破颈线」。我们的告警一律右肩收盘当根发出，`_shape_ok` 的肩离颈余量要求右肩收盘离颈线还有 `≥0.1×height` 的余量（`strategies/head_shoulders.py:520`），**当根不可能已破颈** ⇒ 冲突场景全部落在 D，E/F/G 到不了。实际能出 block 的只有 C。自检里用手工 `breakout_confirmed=True` 的输入证明这三条分支本身写对了。
+
+**大形态怎么找到（探针）**：`probe_large_patterns(symbol, dur, df)` 从最新根往回最多 `PROBE_BARS=60` 根（`HS_TF_CONFLICT_PROBE_BARS`），逐根截断喂常规档 `on_bar`——形态只在「右肩=当根」成立，命中的那个截断点就是右肩；再从该根往后走收盘价推进状态：收越颈线 → confirmed，收盘越过头部极值 或 破位后收回颈线另一侧 → 形态作废、不再参与。窗外的老形态探不到就当作无冲突（**宁可不拦**）。
+
+**发射**：冲突不改变原告警的档位与 kind，只在 reason 前加 `[周期冲突·禁止开仓]` / `[周期冲突·降权观察]`，并带 `extra.conflict=true` + `extra.tf_conflict`（action / weight / reason / 每条大形态的周期·方向·点位·状态）。block 另发一条独立告警：kind `周期冲突·超严重`、`conflict_severe=true`、**必进飞书**、不带 `strict`/`super_strict` 标记（所以不进严格页与超严格页），detail 沿用被拦那条的小形态（图和手动开仓照常能用）。日志标签在档位后追加 `·冲突禁止` / `·冲突降权`（`alert_tag`），另有 `周期冲突拦住开仓 …` 一行。**抢跑只标记不发超严重**（半截 K 本来不开仓，重复发卡没意义）。一个形态的超严重告警只发一条（`_conflict_alerted` 按 `品种|周期|pattern_id|K线时刻` 记）。
+
+**成本与边界**：探针只在**有信号要发**时跑，按 (品种, 大周期, 大周期最新根) 缓存（`ConflictJudge`），启动即有状态、不靠进程里等形态；一个 30m 信号最坏探 3 个大周期 ≈ 几百 ms，落在扫描之后的发射阶段，不动 `本轮扫描 用时`。挂在**父进程**（`db_monitor.__init__`，两个引擎共用一份缓存），分片 worker 不挂——worker 不做副作用，挂了会每片各查一遍库。
+
+**看结果**：App 新增「冲突」页（`?conflict=1`，`extra.conflict`）；`/alerts?conflict=1` 同参；每条冲突卡在 reason 下多一行红/黄横幅（block 红＝已拦，downgrade 黄＝仍开仓但被大周期压着）。⚠️ RN 的 JS 打进 APK，**App 这页要重新出包才看得到**；网页侧即时生效。飞书机器人若用自定义关键词，必须**加 `冲突`**（超严重卡里没有「严格/三重/抢跑」字样），现在共四个：`严格`+`三重`+`抢跑`+`冲突`。
+
 ### 监控品种范围（2026-11-19 起剔掉低流动性品种）
 
 名单只有一个来源：`core/cont_symbols.py::list_commodity_mains` = TqSdk 的 CONT 主连 ∩ 商品交易所白名单（`CZCE/DCE/GFEX/INE/SHFE`，不含中金所）**− `ILLIQUID_PRODUCTS`**。ingest 采集、monitor 检测、`kline_audit`、`repair_today_klines`、`monitor_all_mains_hs` 全部走这一个函数，所以改这里等于同时改覆盖面、扫描量和采集量。
@@ -218,6 +246,7 @@ App 每条告警展开后有一块「手动开仓（模拟盘）」：价位自�
   11-16 已把扫描改成 **3 进程按品种分片**（`core/hs_fanout.py`，`HS_WORKERS` 可调，<2 或任何异常退回串行）：240 键一批实测串行中位 11.22s → 分片稳态 3.74s（**3.0×**，首轮含 worker 冷启动 8.55s）。能拿满 3× 是因为每键那 32 ms 的库往返本来就在等，分片把等待也并发了——不是 CPU 变快（策略侧只占扫描的 8%）。推论（上线后待实测）：一轮扫描的 CPU 总量不变，但同样多的核时被压进 1/3 的时间，分钟边界的脉冲会更尖、同时占 3 个核；看 `docker stats` 时别把这当成回归。
   合成随机游走的 345 ms/根是**上界不是量级**（极值密度比真实数据高）。**与「右肩当根告警」无关**（reason 里右肩时刻 = K 线时刻即口径成立）。
 - **改动必须先 commit + push，再给服务器 pull 命令**：漏一次就白跑一轮回测（60 个作业全崩，台账 #29）。
+- **跨周期判定不能用 K 线下标，而且「区间终点」决定分支可不可达**：小/大周期的 `left_idx`/`right_idx` 各按各的根数算，跨周期只能比 K 线时刻。大形态的区间若钉在右肩那根，颈线突破（必然发生在右肩之后）就永远落在区间外，「大形态已确认 → 禁止开仓」这条**永远走不到**——所以终点取大周期当前根（§1 周期冲突）。同一类坑：判定表里 D（小形态未破颈）排在 E/F 之前，而右肩当根必然未破颈（肩离颈余量 ≥0.1×头高），E/F 是死分支，**别以为写了就生效**。
 
 ## 3. 回测 / A/B：只在服务器上跑
 
@@ -279,6 +308,16 @@ docker run -d --rm --name triple_long --env-file .env -v $PWD/reports:/app/repor
 
 进度看 `tail -n 30 reports/triple_tier.log`（逐键打「进度 N/M 已用 Xs」，没有 `[tag]` 前缀可 grep）；结果在末尾三段：逐周期计数 → 合计 → 每周期最近样例。
 
+周期冲突影响回放（`scripts/audit_tf_conflict.py`：逐品种取小周期**与它上面所有更大周期**的历史，用生产同一份 `probe_large_patterns` / `judge_many` 把大周期序列截到每条信号那根再判，输出逐周期×档位的「无大形态 / 放行 / 降权 / 禁止」+ 被拦那批与放行那批的胜率对比 + 最近 15 条禁止样例）。**判到 block 在实盘会拦住模拟盘开仓**，所以 `.env` 开 `HS_TF_CONFLICT` 之前先跑这个：
+
+```bash
+docker run -d --rm --name tf_conflict --env-file .env -v $PWD/reports:/app/reports -v $PWD/data:/app/data futures-quant-api sh -c "python -u scripts/audit_tf_conflict.py --days 60 --workers 2 >> /app/reports/tf_conflict.log 2>&1"
+```
+
+- 开关：`--days`（默认 60）`--tfs`（**小周期**，秒，如 `1800,3600`）`--symbols` `--workers` `--probe-bars`（默认 60，与生产同源）。大周期不论 `--tfs` 问没问都会取。
+- 本机轻量实测（3 品种 × 90 天 × {30m,1h}，`--workers 1`，2026-11-23）：常规档 61 条 → 无大形态 37、放行 15、降权 4、**禁止 5（8.2%）**；严格档 26 条 → 禁止 1（3.8%）、降权 0。这 6 条禁止的已决**全亏**（0.0%，−0.200×swing）对同期放行常规档 16.1%/−0.039、严格档 8.0%/−0.120。个位数样本，只当「脚本跑得通 + 方向不离谱」的证据，别当结论；且这批品种含沪银，跨换月污染见 §5。
+- 根数不足 `_min_bars` 的周期整片跳过并在末尾点名——看到某档「无信号」先读那行，`--days` 给短了 2h/1d 探不出东西（与 §2 严格档那条同一个坑）。
+
 规则 A/B（`scripts/ab_hs_rules.py`，OLD 用类方法补丁还原旧口径）：`HS_AB_SHARD=k/n`、`HS_AB_TFS`、`HS_AB_SYMBOLS`、`HS_AB_OUT`、`HS_AB_DUMP=1`。命令一律**写成单行**，反斜杠续行粘进终端会被截断成 `-bash: ocker: command not found`。
 
 ```bash
@@ -313,6 +352,11 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
   群里该收到卡片了就手动造一条（**会在群里发一条测试卡片**）：
   `docker compose exec futures-monitor python -c "from core.alert_store import Alert; from core.feishu_notify import send_alert_feishu; print(send_alert_feishu(Alert(id='t1', symbol='KQ.m@CZCE.PF', kind='头肩底·严格', reason='[短纤 · 30分钟] 推送链路自测', bar_time='2026-11-18T14:30:00', created_at='2026-11-18 14:30:01', extra={'name': '短纤', 'duration': '30分钟', 'strict': True, 'detail': {'swing': 17.0}})))"`
   回 `{'sent': 1}` 即通（**11-18 已实测通过**：手机飞书收到卡片）；回 `no_webhook` = 变量没进容器；回 `{'sent': 0, 'code': 11232...}` 之类 = 地址对但被拒，最常见是机器人「安全设置」勾了**自定义关键词**而消息没命中——**11-19 起三重也上飞书，只勾 `严格` 这一个关键词会把三重卡片全拒掉**（三重 kind 是「三重顶/三重底」，整张卡没有「严格」二字）。**11-21 起抢跑也推，关键词还要加 `抢跑`**（常规抢跑卡是「头肩底·抢跑」，整卡没有「严格」「三重」字样）。所以：首选勾**签名校验**并把 `FEISHU_WEBHOOK_SECRET` 填进 `.env`；用自定义关键词的话必须加到三个（飞书是"命中任一即放行"），即 `严格` + `三重` + `抢跑`。另外注意手动自测那条用的是严格档文案，**它通不代表三重/抢跑也通**，按上面这条核过关键词才算完。之后真告警看 `grep 飞书 reports/monitor.log | tail`。
+- **周期冲突（§1，默认关）落在 `futures-monitor`（判定、拦仓、发超严重告警）和 `futures-api`（`?conflict=1` 过滤）两个镜像**：`docker compose up -d --build futures-api futures-monitor`。开法：`.env` 加 `HS_TF_CONFLICT=1` 再 `docker compose up -d futures-monitor`（改开关不用 `--build`，改代码要）。核四件事：
+  `docker compose exec futures-monitor grep -c "def probe_large_patterns" /app/core/tf_conflict.py` 期望 `1`；
+  `docker compose exec futures-monitor grep -c "or super_strict or conflict_severe" /app/core/hs_monitor.py` 期望 `1`；
+  启动行要看到 `[monitor] 周期冲突判定已启用 大周期配对=15 探针=60根 拦截=block不开仓`（回 `周期冲突判定未启用` 就是 `.env` 没生效）；
+  真出冲突时日志有 `[monitor] 严格告警·冲突禁止 …`、`[monitor] 周期冲突拦住开仓 …`，`grep -a 冲突 reports/monitor.log | tail`。**开之前先跑 §3 的影响回放**——这条会真的少开单。
 - 验证真进容器：`docker compose exec futures-monitor grep -c <新函数名> /app/core/paper_trade.py`（`grep -c` 数匹配行数，只出现一次时期望值就是 `1`）。
 - `docker compose logs futures-monitor`（和 ingest）**永远是空的，不是故障**——stdout 被重定向进 `reports/*.log`，用 `tail -n 40 reports/monitor.log`。
 - 分片并发数走 `HS_WORKERS`（`.env` 或 compose `environment:`），改这个**只需 `docker compose up -d futures-monitor` 重建容器，不用 `--build`**；设成 1 等于关掉分片。生产是 4 核、ingest 常态吃掉 1 核，3 是当前的折中。
@@ -324,6 +368,7 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
 
 ## 5. 未闭环
 
+- **周期冲突（§1，11-23 实现完，默认关，三件待办）**：①**全市场影响回放没跑**（命令在 §3）——判到 block 会拦住严格档/超严格的模拟盘开仓，条数与「拦对还是拦错」必须先有数再决定开不开 `.env`；②App 的「冲突」页与横幅要**重新出 APK**（RN 的 JS 打进包里），网页侧部署即生效；③飞书机器人走自定义关键词的话要**加 `冲突`**（超严重卡里没有严格/三重/抢跑字样），否则整类卡片被拒且手机无提示。另有两处拍的数待 A/B 后裁决：探针窗 `PROBE_BARS=60` 对 1d 是三个月、对各周期是否该分开定阈；`NEAR_TOLERANCE_RATIO=0.05`（规格原话的 5%）在现口径下走不到，若哪天要让 E/F 生效得先确认它该是绝对价比还是按形态高度。
 - **飞书推送（§1）严格档已上线（11-18 实测 `{'sent': 1}` + 手机收到卡片）；11-19 把三重也加了进来；11-20 夜盘已随 `808fc9a` 部署（api+monitor 重建，容器内标记 2/0/1 核过，ingest 未动）**。部署时一次带上了三件事：三重新口径（`17c1e4f` + `9a0fd8b`）、三重进飞书、严格档/三重进抢跑。部署后还剩两件要盯：①**确认机器人安全设置不是只有 `严格` 一个关键词**，否则三重卡片全被拒（飞书拒收只打在 `飞书推送结果:` 那行日志里，手机上没有任何提示，容易以为"没出形态"）；②等第一条真三重/抢跑档，`grep -E "三重告警|抢跑告警|飞书" reports/monitor.log | tail`。还差两件旧账：`mobile/App.tsx` 的推送状态文案要下次出 APK 才生效；Expo/FCM 那条远程推送通道保持"永久不通"（小米机要 FCM 本身也不可靠，台账 #46 记了理由，别再当 bug 排查）。**11-20 起抢跑里的严格档/三重也进飞书**（见 §1 抢跑段），仍只有 App 活着时才有通知的只剩「常规档」和「常规档抢跑」两类。
 - **三重顶/底（§1 新通道）还剩两件**：①全市场条数、撞头肩同根率、逐周期胜率还没跑（命令在 §3，老机 2 核两片，别在生产机工作时段跑）；②生产镜像**已于 11-20 夜盘随 `808fc9a` 部署**（api+monitor 重建，ingest 未动）；③App 头部副标题已改成「头肩 / 三重形态 · 实时通知」，但 RN 的 JS 打进 APK，**这行文案要下次出包才生效**——不影响功能（三重告警本身是数据驱动，旧包照收照显示）。
 - ~~**三重在 5m 上可能太密**~~：这条是旧口径（第三脚当根、价格 2.5% 等高、无突破、无相邻约束）测出来的 133 条，已作废——11-18 用户整页否决后按图例重写（台账 #47）。新口径条数会大幅下降，等生产上重跑 `/backtest/triple` 再看密度与胜率。
