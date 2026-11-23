@@ -199,10 +199,10 @@ class TriplePatternStrategy(HeadShouldersStrategy):
         idx2, price2 = p2
         idx3, price3 = p3
         # 底的回调点是反弹高（取最高），顶的回调点是回落低（取最低），与头肩同口径
-        s1 = self._reaction_neck(react_pivots, idx1, idx2, lowest=not bottom)
+        s1 = self._reaction_neck(react_pivots, idx1, idx2, lowest=not bottom, klines=klines)
         if s1 is None:
             return None
-        s2 = self._reaction_neck(react_pivots, idx2, idx3, lowest=not bottom)
+        s2 = self._reaction_neck(react_pivots, idx2, idx3, lowest=not bottom, klines=klines)
         if s2 is None:
             return None
         idx_n1, v1 = s1

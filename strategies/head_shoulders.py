@@ -727,15 +727,31 @@ class HeadShouldersStrategy:
         i1: int,
         *,
         lowest: bool,
+        klines: pd.DataFrame | None = None,
     ) -> tuple[int, float] | None:
-        """肩和头之间的颈线拐点，离开两端各至少一根即可。"""
+        """肩和头之间的颈线拐点，离开两端各至少一根即可。
+
+        用户 2026-11-23 裁决「右肩确定即开仓」：当 confirmed pivot 在 (i0,i1) 内为空时，
+        若传入 klines，回退到该区间内的实际极值（底取最低、顶取最高），让 P3 当根能出信号。
+        """
         gap = 1
         inside = [p for p in reaction_pivots if i0 + gap <= p[0] <= i1 - gap]
-        if not inside:
+        if inside:
+            if lowest:
+                return min(inside, key=lambda p: (p[1], p[0]))
+            return max(inside, key=lambda p: (p[1], -p[0]))
+        # 无确认拐点 → 回退到区间内实际极值（P3 当根场景）
+        if klines is None or i1 - i0 < 3:
             return None
-        if lowest:
-            return min(inside, key=lambda p: (p[1], p[0]))
-        return max(inside, key=lambda p: (p[1], -p[0]))
+        lo, hi = i0 + 1, i1 - 1
+        if lo > hi:
+            return None
+        series = klines["low"] if lowest else klines["high"]
+        window = series.iloc[lo : hi + 1]
+        if window.empty:
+            return None
+        idx = window.idxmin() if lowest else window.idxmax()
+        return int(idx), float(window.loc[idx])
 
     def _tr(self, idx_l: int, idx_h: int, idx_r: int, why: str) -> None:
         if self.trace:
@@ -801,7 +817,7 @@ class HeadShouldersStrategy:
                     continue
                 # 只依赖 (li, hi) 的量在外层算一次，ri 循环里只查表
                 neck_l = self._reaction_neck(
-                    reaction_pivots, idx_l, idx_h, lowest=not bottom
+                    reaction_pivots, idx_l, idx_h, lowest=not bottom, klines=klines
                 )
                 between_l: list[tuple[int, float]] = []
                 if self.strict_shape:
@@ -871,7 +887,7 @@ class HeadShouldersStrategy:
                         continue
                     win_lo, win_hi = agg(idx_l, idx_r + 1)
                     neck_r = self._reaction_neck(
-                        reaction_pivots, idx_h, idx_r, lowest=not bottom
+                        reaction_pivots, idx_h, idx_r, lowest=not bottom, klines=klines
                     )
                     if neck_l is None or neck_r is None:
                         self._tr(idx_l, idx_h, idx_r, "neck_none")
