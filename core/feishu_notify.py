@@ -88,18 +88,22 @@ def build_card(alert: Alert, public_base: str = "") -> dict[str, Any]:
         {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}
     ]
     if base and alert.id:
-        elements.append(
+        actions: list[dict[str, Any]] = [
             {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": "看形态图"},
-                        "url": f"{base}/api/alerts/{alert.id}/chart.png",
-                    }
-                ],
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "看形态图"},
+                "url": f"{base}/api/alerts/{alert.id}/chart.png",
             }
-        )
+        ]
+        if extra.get("conflict") and extra.get("large_chart_detail"):
+            actions.append(
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "看大周期形态图"},
+                    "url": f"{base}/api/alerts/{alert.id}/large-chart.png",
+                }
+            )
+        elements.append({"tag": "action", "actions": actions})
     tail = [t for t in (alert.symbol, duration, str(detail.get("pattern_kind") or "")) if t]
     elements.append(
         {

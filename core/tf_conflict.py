@@ -86,6 +86,51 @@ class LargePattern:
             "breakout_at": _iso(self.breakout_dt) if self.breakout_dt else None,
         }
 
+    def chart_detail(self) -> dict[str, Any]:
+        """转成 render_hs_chart 能吃的 detail，供冲突卡画大周期形态图。
+
+        LargePattern 不存 head_dt（只存 start_dt=左肩、right_dt=右肩、end_dt=最新根），
+        头的时间用左右肩中点近似，画图只用来标 H 点位置，不影响窗口计算。
+        """
+        from datetime import timedelta
+
+        head_t = self.start_dt + (self.right_dt - self.start_dt) / 2
+        return {
+            "left": self.left,
+            "head": self.head,
+            "right": self.right,
+            "neck": self.neck,
+            "left_time": _iso(self.start_dt),
+            "head_time": _iso(head_t),
+            "right_time": _iso(self.right_dt),
+            "side": "short" if self.direction == "long" else "long",
+            "pattern_kind": "头肩顶" if self.pattern == PATTERN_TOP else "头肩底",
+        }
+
+
+def large_pattern_chart_detail(large_dict: dict[str, Any]) -> dict[str, Any]:
+    """从 to_dict() 输出转成 render_hs_chart 能吃的 detail。
+
+    用于冲突告警：verdict 里存的是 to_dict() 结果，画图时需要补上 head_time。
+    """
+    from datetime import datetime
+
+    start_t = datetime.fromisoformat(large_dict["start"])
+    right_t = datetime.fromisoformat(large_dict["right_shoulder"])
+    head_t = start_t + (right_t - start_t) / 2
+    return {
+        "duration_sec": large_dict["duration_sec"],
+        "left": large_dict["left"],
+        "head": large_dict["head"],
+        "right": large_dict["right"],
+        "neck": large_dict["neck"],
+        "left_time": large_dict["start"],
+        "head_time": head_t.isoformat(timespec="seconds"),
+        "right_time": large_dict["right_shoulder"],
+        "side": "short" if large_dict["direction"] == "long" else "long",
+        "pattern_kind": "头肩顶" if large_dict["pattern"] == PATTERN_TOP else "头肩底",
+    }
+
 
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat(timespec="seconds") if dt else None

@@ -575,6 +575,41 @@ def api_alert_chart(alert_id: str) -> Response:
     )
 
 
+@app.get("/api/alerts/{alert_id}/large-chart.png")
+def api_alert_large_chart(alert_id: str) -> Response:
+    """周期冲突告警的大周期形态图：取 extra.large_chart_detail 画反向大形态。"""
+    alert = next(
+        (
+            a
+            for a in list_alerts(limit=1000, include_superseded=True)
+            if a.get("id") == alert_id.strip()
+        ),
+        None,
+    )
+    if alert is None:
+        raise HTTPException(404, "告警不存在")
+    extra = alert.get("extra") or {}
+    large_detail = extra.get("large_chart_detail") or {}
+    if not large_detail:
+        raise HTTPException(404, "该告警没有大周期形态关键点")
+    duration_sec = large_detail.get("duration_sec") or extra.get("duration_sec")
+    if not duration_sec:
+        raise HTTPException(404, "缺大周期周期信息")
+    bar_time = large_detail.get("right_time") or alert["bar_time"]
+    conn = connect()
+    try:
+        png = render_hs_chart(alert["symbol"], int(duration_sec), bar_time, large_detail, conn)
+    finally:
+        conn.close()
+    if not png:
+        raise HTTPException(404, "没有可画的 K 线")
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
 @app.post("/api/alerts/clear")
 def api_clear_alerts() -> dict[str, Any]:
     """清空历史告警（启动误刷 / 测试数据）。"""

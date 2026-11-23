@@ -243,6 +243,7 @@ def emit_alert(
     super_strict: bool = False,
     conflict: dict[str, Any] | None = None,
     conflict_severe: bool = False,
+    large_chart_detail: dict[str, Any] | None = None,
 ) -> str | None:
     """写告警并推送，返回告警 id，供模拟账户把这笔单和告警对上。"""
     label = DURATION_LABELS.get(duration_sec, str(duration_sec))
@@ -295,6 +296,8 @@ def emit_alert(
         extra["pattern"] = pattern_key
     if detail:
         extra["detail"] = detail
+    if large_chart_detail:
+        extra["large_chart_detail"] = large_chart_detail
 
     alert_id: str | None = None
     try:
@@ -633,12 +636,18 @@ class HsMonitorEngine:
         toast: bool = False,
     ) -> int:
         """超严重的周期冲突告警：独立一条，与被它压住的那条分开，一个形态只出一条。"""
+        from core.tf_conflict import large_pattern_chart_detail
+
         key = f"{det.symbol}|{det.duration_sec}|{_pattern_of(det)}|{det.last_dt.isoformat()}"
         if key in self._conflict_alerted:
             return 0
         if len(self._conflict_alerted) > _CONFLICT_CACHE_MAX:
             self._conflict_alerted.clear()
         self._conflict_alerted.add(key)
+        large_detail = None
+        large_list = verdict.get("large") or []
+        if large_list:
+            large_detail = large_pattern_chart_detail(large_list[0])
         emit_alert(
             symbol=det.symbol,
             duration_sec=det.duration_sec,
@@ -651,6 +660,7 @@ class HsMonitorEngine:
             toast=toast,
             conflict=verdict,
             conflict_severe=True,
+            large_chart_detail=large_detail,
         )
         return 1
 
