@@ -142,9 +142,17 @@
 
 **看结果**：App 新增「冲突」页（`?conflict=1`，`extra.conflict`）；`/alerts?conflict=1` 同参；每条冲突卡在 reason 下多一行红/黄横幅（block 红＝已拦，downgrade 黄＝仍开仓但被大周期压着）。⚠️ RN 的 JS 打进 APK，**App 这页要重新出包才看得到**；网页侧即时生效。飞书机器人若用自定义关键词，必须**加 `冲突`**（超严重卡里没有「严格/三重/抢跑」字样），现在共四个：`严格`+`三重`+`抢跑`+`冲突`。
 
-### 监控品种范围（2026-11-19 起剔掉低流动性品种）
+### 监控品种范围（2026-11-19 起剔低流动性；2026-11-23 起订持仓主力月约）
 
-名单只有一个来源：`core/cont_symbols.py::list_commodity_mains` = TqSdk 的 CONT 主连 ∩ 商品交易所白名单（`CZCE/DCE/GFEX/INE/SHFE`，不含中金所）**− `ILLIQUID_PRODUCTS`**。ingest 采集、monitor 检测、`kline_audit`、`repair_today_klines`、`monitor_all_mains_hs` 全部走这一个函数，所以改这里等于同时改覆盖面、扫描量和采集量。
+名单入口仍是 `core/cont_symbols.py::list_commodity_mains`，但 **2026-11-23 起返回的是持仓量最大的真实月约**（如 `SHFE.ag2702`），不再订 `KQ.m@` 拼价主连——主连换月会把形态窗口里的极值变成两个合约的比价，等高/颈线/Dev% 会被基差翻转（沪银 11-20 实证）。
+
+**覆盖面**：仍由 CONT ∩ 商品交易所白名单（`CZCE/DCE/GFEX/INE/SHFE`，不含中金所）**− `ILLIQUID_PRODUCTS`** 决定有哪些品种；每个品种落到哪个月，由 `core/dominant.py` 按持仓量解析，落库表 `dominant_contracts`。
+
+**主力口径**：日常 = 该品种未下市期货里持仓量最大的月份；换月需新月持仓连续 **2** 个刷新周期领先才切（成交只作同持仓时的 tie-break，不单独靠成交切）。ingest 每开盘时段刷新一次 ≈ 按交易日确认。
+
+**冷启动**：换月/首建时按周期拉历史——日内约 **90** 日历天、日线约 **400** 天（覆盖 lookback，不是全品种统一一年）。首迁上线或补缺口：休市跑 `python scripts/refresh_dominants.py --bootstrap-missing`；`--no-bootstrap` 只刷表。ingest 盘中只在换月时冷启动，避免开盘卡死。
+
+ingest 采集、monitor 检测、`kline_audit`、`repair_today_klines`、`monitor_all_mains_hs` 全部走 `list_commodity_mains`，所以改这里等于同时改覆盖面、扫描量和采集量。`KQ.m@` 主连仍可通过 `list_commodity_cont_mains` / `list_main_continuous` 做长序列回填，但**不做形态检测订阅**。
 
 **11-19 用户裁决**：截图点名「粳米这类非常不活跃的期货不要放进去观察」。口径给的是**近 90 日 1d 日均成交量 < 5000 手**（同期全市场中位数 16.2 万手），命中 11 个：
 
@@ -231,6 +239,7 @@ App 每条告警展开后有一块「手动开仓（模拟盘）」：价位自�
 - **严格档每根都跑完整一遍，策略侧成本 = 两遍**（11-17 去掉延迟确认之后就是这样，延迟版那层 O(pivot_order) 预筛没了）：本机实测（`_strict_cost.py`，30 天真实库逐根滚动，同一份窗口分别调 `on_bar` / `on_bar_strict`）eg 5m **6.40 → +6.43 ms**、jd 1m 5.51 → +5.52、PF 30m 3.27 → +3.50，即严格档那一跑与常规档几乎等价，**策略侧翻倍**。绝对值别直接搬：本机比 11-16 服务器口径（1m 2.7 / 5m 2.5 / 30m 3.6 ms）慢一截，用比值。按服务器那份结构推（130 键）：策略侧 `0.35s → ~0.7s`，取数侧 4.2s 的库往返不变 → 单轮增量 <0.4s，占现分片稳态 3.74s 的 ~10%；但这是 CPU 不是等待，3 片仍要同时占 3 核。**待线上复核**：`reports/monitor.log` 的 `本轮扫描 ... 用时` 与 `docker stats`。
 - **加载窗不够会静默跳过周期**：`run_backtest.py:45` 的 `LOAD_DAYS` = 1m/5m 60 天、30m 90、1h 120、2h 150、1d 300。60 天窗里 SH 的 2h 只有约 107 根，低于阈值就不出数；中金所品种只有日盘，1h 也会缺。看到某周期整列缺失先按这个算，不是 bug。
 - **夜盘的会话周期到 01:00 / 02:30（11-20 修，台账 #56）**：`utils/trading_session.py` 的夜盘段原来只定义 21:00-23:00，于是有色（CU AL ZN PB NI SN SS BC，夜盘到 01:00）与贵金属·原油（AU AG SC，到 02:30）**后半夜的成交在 30m/1h/2h/3h/4h 里一根都没有**（1m/5m 一直有，所以洞只在会话周期上）。现在夜盘段 = 当晚 21:00-23:59 + 次日凌晨 00:00-02:29，并且**一夜=一组**：合成时把「当晚的分钟 + 次日凌晨的分钟」放进同一个池子（`core/session_rebuild.py:aggregate_symbol_session`、`core/session_klines.py:_sync_day_bars`）——按自然日分组的话，跨零点那段会留在次日那一组里没人认领（次日的夜盘筛选只认 21:00 之后），那半小时到三个半小时就彻底消失。
+- **AU/AG/SC 日盘切法与普通商品不同（11-23，对照 `docs/futures_bars_full.csv`）**：这三只夜盘到 02:30，日盘 30m/1h 用整点网格（30m=`09:30/10:00/10:30/11:00/11:30/14:00/14:30/15:00`，1h=`10:00/11:00/11:30/14:00/15:00`），**2h 日盘=`09:30/13:45/15:00`（无 11:30）**，不再套普通商品的跨小节合成（10:45/11:15…）。合成入口一律带 `symbol=`，由 `is_long_night_product` 分流。改完后须对这三只重刷会话 K：`scripts/rebuild_session_klines.py --symbols KQ.m@SHFE.au,KQ.m@SHFE.ag,KQ.m@INE.sc --execute`。
   落根：30m 每半小时一根（23:30、次日 00:00/00:30/01:00，贵金属原油再到 01:30/02:00/02:30）、1h 整点一根、2h 两根（23:00、01:00）+ 贵金属原油第三根 02:30（90 分钟）。**3h/4h 不排固定钟点**：整夜按 180/240 分钟顺序切段、末段不足也算一根、收线时刻由实际分钟线推——120 分钟的短夜盘结果与改前**逐字节一致**，只有长夜盘才多落根（固定钟点要么给短夜盘贴错标签，要么把后半夜并进次日日盘）。
   标签日期：凌晨那几根标注在**次日**（`2026-11-20 00:00` 是 11-19 那一夜的 K），跨零点的 2h 根 `datetime_start` 仍在当晚 23:00。
   实盘侧靠 `get_all_session_trigger_minutes()` 新增的 23:29 / 23:59 / 00:29 / 00:59 / 01:29 / 01:59 / 02:29 触发刷新；`session_bar_open`（`core/realtime_pipeline.py:115`）的半截闸门自动生效——标注时刻没越过墙钟就不当真 K。审计夜盘窗本来就是 前一日 20:55~当日 02:40，覆盖得到，不用改。
@@ -342,7 +351,7 @@ ETA：`awk -F'[()]' 'NF>2{gsub("s","",$2); s+=$2; n++} END{if(n)printf "已完�
   服务名显式列全、**绝不带 `futures-backtest`**（一次性回测任务，裸 `up` 会把它点起来打满 CPU）。
 - 手动开仓（§1）只需要 `futures-api`（接口与 `manual_open`）和 `futures-monitor`（同步接手这笔）两个镜像新；`paper_trade.price_tick` 那列由 `ensure_schema` 在第一次调用时自己 `ALTER`，**不用手工 DDL**。核一下：`docker compose exec futures-api grep -c "def manual_open" /app/core/paper_trade.py` 期望 `1`。
 - 三重通道（§1）落在 `futures-monitor`（检测、发射、模拟盘）和 `futures-api`（`chart.png` 画 P1/P2/P3）两个镜像里，`docker compose up -d --build futures-api futures-monitor` 就够，ingest 不涉及。上线后核两件事：`docker compose exec futures-monitor grep -c "def detect_triple" /app/core/hs_monitor.py` 期望 `1`；日志里应出现 `[monitor] 三重告警 …` 这种行（没有不代表坏，代表还没遇到形态）。
-- **改品种名单（§1 监控品种范围）必须重建 `futures-ingest`**，不只是 monitor：`list_commodity_mains` 同时喂采集（`core/realtime_pipeline.py:304`）和检测（`core/db_monitor.py:131`），api 侧没调用。所以 11-19 这次要 `docker compose up -d --build futures-api futures-ingest futures-monitor`（把之前"ingest 不涉及"那句忘掉，那是三重通道那次的情况）。核两件事：`docker compose exec futures-monitor grep -c "ILLIQUID_PRODUCTS" /app/core/cont_symbols.py` 期望 `2`（定义 + 过滤各一行）；启动后 `grep 品种 reports/ingest.log | tail -3` 看订阅数量，应从 `81` 掉到 **`70`**（掉 11 个才对，没掉就是镜像没新；**11-19 部署实测就是这样**，最后一行 `[pipeline] 品种 70，先订 1m,5m,1d （210 序列）`）。**别在交易时段重启 ingest**——重启窗口里的 1m 根会缺，得回头补历史。
+- **改品种名单（§1 监控品种范围）必须重建 `futures-ingest`**，不只是 monitor：`list_commodity_mains` 同时喂采集（`core/realtime_pipeline.py:304`）和检测（`core/db_monitor.py`）。11-19 / **11-23 持仓主力月约**都要 `docker compose up -d --build futures-api futures-ingest futures-monitor`。11-23 上线前先休市跑 `python scripts/refresh_dominants.py --bootstrap-missing`（或容器内同等命令）把月约历史补齐；核：`docker compose exec futures-monitor grep -c dominant_contracts /app/core/dominant.py` ≥1；启动后 ingest 日志应是 `品种 ~69` 且合约形如 `SHFE.ag2702`（不再是 `KQ.m@`）。**别在交易时段重启 ingest**——重启窗口里的 1m 根会缺，得回头补历史。
 - **单独 build 某服务时只能写 `futures-api`（11-20 踩坑）**：compose 里只有 `futures-api` 有 `build: .`，`futures-ingest`/`futures-monitor`/`futures-backtest` 都只写 `image: futures-quant-api:latest` 共用同一个镜像，所以 `docker compose build futures-ingest` 是**空操作**、镜像一点没变，而 `up -d --build <多服务>` 会顺带触发那唯一一次 build，所以这个坑只在"想只更新镜像、不重启在线容器"时才会踩到。一次性补数容器（`compose run --rm --no-deps futures-ingest ...`）取的正是新 tag，因此**补数可以在重启在线容器之前做**。闸要用 ASCII 标记核，别用中文 grep 参数（宿主机传参编码可能不匹配）：`docker compose run --rm --no-deps futures-ingest grep -c bounded /app/core/session_rebuild.py` 期望 `2`（旧代码 `0`）。
 - 飞书推送（§1，**严格档 + 三重 + 抢跑**）只在 `futures-monitor` 一个进程里发射，`docker compose up -d --build futures-api futures-monitor` 就带上了（api 侧没改动，带上是为了同批镜像）。**机器人地址要写进生产机的 `.env`**，改 `.env` 本身不需要 `--build`，但 `docker compose up -d futures-monitor` 得跑一次才会把新变量注入容器。核三件事：
   `docker compose exec futures-monitor grep -c "def send_alert_feishu" /app/core/feishu_notify.py` 期望 `1`；

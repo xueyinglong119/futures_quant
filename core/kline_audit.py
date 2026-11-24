@@ -255,7 +255,9 @@ def audit_symbol_session(
         for m in minute_bj
         if start - timedelta(hours=1) <= m["datetime"] <= end + timedelta(hours=1)
     ]
-    built = aggregate_symbol_session(clipped, ALL_SESSION_TFS, include_night=True)
+    built = aggregate_symbol_session(
+        clipped, ALL_SESSION_TFS, include_night=True, symbol=symbol
+    )
     diffs: list[DiffItem] = []
     for tf in ALL_SESSION_TFS:
         dur = TF_DURATION[tf]
@@ -440,7 +442,9 @@ def run_post_close_audit(
     ensure_table(conn)
     try:
         if symbols is None:
-            symbols = list_commodity_mains(api)
+            symbols = list_commodity_mains(
+                api, conn, refresh=True, bootstrap_history=False
+            )
         report.checked_symbols = len(symbols)
 
         # 1) 会话周期：不依赖天勤，先快校

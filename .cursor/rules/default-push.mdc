@@ -1,0 +1,12 @@
+---
+description: 本仓库改完后默认 commit 并 push 到 origin
+alwaysApply: true
+---
+
+# 默认推送
+
+对本仓库（futures_quant）完成代码改动后：
+
+1. **默认**创建 git commit（信息写清 why），并 **`git push` 到 origin**，无需用户再口头说「推送」。
+2. 用户明确说「先别推 / 不要 push」时才只 commit 或只改不提交。
+3. 仍遵守：不改 git config、不 force push main、不提交密钥与临时探针（`_*.py` 探测脚本、reports 产物等，除非用户点名）。

@@ -1,10 +1,10 @@
 """从库内 1 分钟 K 按国内交易时段重算 30m / 1h / 2h / 3h / 4h。
 
-写入 kline_bars 时使用北京时间结束标注（与盘面一致），例如：
+写入 kline_bars 时使用北京时间结束标注（与盘面一致）。普通商品例如：
   1h: 10:00 / 11:15 / 14:15 / 15:00
   2h: 11:15 / 15:00
-  3h: 14:15 / 15:00
-  4h: 15:00
+AU/AG/SC（夜盘到 02:30）日盘另用整点网格，见 utils.trading_session 与
+docs/futures_bars_full.csv。
 会先删除该品种对应周期在重建范围内的旧行（含天勤整点口径），再 upsert 新结果。
 删除范围只取本次真正重算出来的那几根的跨度，绝不外扩：外扩会抹掉窗内无法重建的
 邻日/邻夜会话K，而校验窗只往前走，那些根再也补不回来。
@@ -122,12 +122,15 @@ def aggregate_symbol_session(
     tfs: Iterable[SessionTf] = ALL_SESSION_TFS,
     *,
     include_night: bool = True,
+    symbol: str | None = None,
 ) -> dict[SessionTf, list[dict[str, Any]]]:
     """按自然日分组合成小节 K，返回可入库行。
 
     夜盘那一组还要带上**次日凌晨 02:30 前**的分钟线：有色跨零点交易到 01:00、贵金属与
     原油到 02:30，只喂当晚的分钟，跨零点那段就留在次日那一组里没人认领（次日的夜盘筛选
     只认 21:00 之后），那半小时到三个半小时的成交会既不进当晚的会话 K、也不进次日日盘。
+
+    symbol 用于区分 AU/AG/SC 的日盘整点网格与普通商品的会话合成。
     """
     by_day: dict[date, list[dict[str, Any]]] = {}
     for m in minute_bj:
@@ -142,7 +145,7 @@ def aggregate_symbol_session(
                 pool.extend(m for m in tail if m["datetime"].time() < NIGHT_TAIL[1])
         for tf in result:
             agg = _AGGREGATORS[tf]
-            raw = agg(pool, trade_date, include_night=include_night)
+            raw = agg(pool, trade_date, include_night=include_night, symbol=symbol)
             result[tf].extend(session_dicts_to_store_rows(raw))
     return result
 
@@ -205,7 +208,7 @@ def rebuild_symbol_session_klines(
         minute_bj = clipped
 
     built = aggregate_symbol_session(
-        minute_bj, tf_list, include_night=include_night
+        minute_bj, tf_list, include_night=include_night, symbol=symbol
     )
     stats: dict[str, int] = {
         "1m_used": len(minute_bj),

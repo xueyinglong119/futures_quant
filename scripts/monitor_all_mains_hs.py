@@ -55,7 +55,8 @@ def _resolve_symbols(args: argparse.Namespace) -> list[str]:
         return [s.strip() for s in args.symbols.split(",") if s.strip()]
     if args.watchlist:
         return list(WATCH_MAIN_SYMBOLS)
-    return list_commodity_mains()
+    # 回放扫库：用已落库主力月约，不再冷启动
+    return list_commodity_mains(refresh=False, bootstrap_history=False)
 
 
 def run_scan(

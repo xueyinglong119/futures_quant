@@ -2,8 +2,8 @@
 
 入库周期：1/3/5/10/15 分、日/周（直接订阅天勤）。
 30m/1h/2h/3h/4h 不按天勤整点写库，而在 1 分钟收盘后按国内交易时段从 1m 合成：
-  日盘 1h: 10:00 / 11:15 / 14:15 / 15:00
-  日盘 2h: 11:15 / 15:00；3h: 14:15 / 15:00；4h: 15:00
+  日盘 1h: 10:00 / 11:15 / 14:15 / 15:00（AU/AG/SC: 10:00/11:00/11:30/14:00/15:00）
+  日盘 2h: 11:15 / 15:00（AU/AG/SC: 09:30/13:45/15:00）；3h/4h 见 trading_session
 月/季/年在日线收盘后由日线聚合。头肩仍只跑 HS_MONITOR_DURATIONS。
 
 只把已经走完的 K 线入库。正在走的那根只留在行情里，收盘后下一拍写入。
@@ -301,7 +301,10 @@ class RealtimePipeline:
             self.broker = None
             print("[pipeline] ingest 模式：只写库，告警由 monitor 服务负责", flush=True)
         try:
-            symbols = list_commodity_mains(api)
+            # 刷新持仓主力月约；缺历史的品种在 dominant 内按 lookback 冷启动
+            symbols = list_commodity_mains(
+                api, conn, refresh=True, bootstrap_history=True
+            )
             primary_labels = [DURATION_LABELS[d] for d in PRIMARY_LIVE_DURATIONS]
             extra_labels = [DURATION_LABELS[d] for d in EXTRA_LIVE_DURATIONS]
             print(

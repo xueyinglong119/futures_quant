@@ -57,7 +57,7 @@ def get_today_klines(
         if use_session:
             minute_bars = _parse_minute_bars(klines, target_date)
             bars = aggregate_session_bars(
-                minute_bars, target_date, time_label=time_label
+                minute_bars, target_date, time_label=time_label, symbol=tq_symbol
             )
             time_note = get_day_30min_schedule_text()
         else:

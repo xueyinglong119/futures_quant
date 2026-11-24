@@ -157,10 +157,24 @@ class DbHsMonitor:
 
     def _symbols(self, conn, api: TqApi) -> list[str]:
         try:
-            return list_commodity_mains(api)
+            # 读库优先：ingest 已刷新 dominant_contracts；避免 monitor 再刷一遍 OI/冷启动
+            return list_commodity_mains(
+                api, conn, refresh=False, bootstrap_history=False
+            )
         except Exception:
             traceback.print_exc()
-            return drop_illiquid(list_symbols(conn, duration_sec=60) or list_symbols(conn))
+            try:
+                from core.dominant import list_stored_dominants
+
+                stored = list_stored_dominants(conn)
+                if stored:
+                    return stored
+            except Exception:
+                traceback.print_exc()
+            # 最后兜底：库里非 KQ.m@ 的月约（剔除低流动性）
+            raw = list_symbols(conn, duration_sec=60) or list_symbols(conn)
+            month = [s for s in raw if not s.startswith("KQ.m@")]
+            return drop_illiquid(month or raw)
 
     def _pending_keys(self, marks: dict) -> list[tuple[str, int, bool]]:
         """水位前进、且不是半截会话 K 的键；顺手记水位，保证每根只算一次。"""

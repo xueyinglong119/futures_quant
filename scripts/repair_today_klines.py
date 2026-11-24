@@ -142,7 +142,9 @@ def main() -> None:
         if args.symbols:
             symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
         else:
-            symbols = list_commodity_mains(api)
+            symbols = list_commodity_mains(
+                api, conn, refresh=True, bootstrap_history=False
+            )
         print(
             f"repair day={day} symbols={len(symbols)} "
             f"durations={','.join(DURATION_LABELS[d] for d in durations)}",

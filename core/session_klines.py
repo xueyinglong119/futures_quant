@@ -147,7 +147,9 @@ class SessionKlineFeed:
         kept = [row for row in rows if row["datetime_end"] not in stale_ends]
 
         fresh: set[str] = set()
-        for bar in aggregate_session_bars(pool, trade_date, time_label="end"):
+        for bar in aggregate_session_bars(
+            pool, trade_date, time_label="end", symbol=main_symbol
+        ):
             fresh.add(bar["datetime_end"])
             kept.append(bar)
 
