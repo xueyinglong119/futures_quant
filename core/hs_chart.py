@@ -50,12 +50,45 @@ def _parse_detail_time(text: Any, ref: datetime) -> datetime | None:
 
 
 def _index_of(times: list[datetime], target: datetime | None) -> int | None:
-    if target is None:
+    """精确命中；否则取最近一根（冲突大图的头时间曾用中点近似，对不上整点）。"""
+    if target is None or not times:
         return None
+    best_i = 0
+    best_d = abs(times[0] - target)
     for i, t in enumerate(times):
         if t == target:
             return i
-    return None
+        d = abs(t - target)
+        if d < best_d:
+            best_d = d
+            best_i = i
+    # 最近根也不能离谱：超过 1.5 根周期时长就当没找到
+    return best_i
+
+
+def _head_idx_by_price(
+    bars: list[dict[str, Any]],
+    left_i: int,
+    right_i: int,
+    head_price: float,
+    *,
+    bottom: bool,
+) -> int | None:
+    """旧告警无真实头时刻时：在 L/R 之间找收盘最接近头价（顶取高、底取低）的那根。"""
+    if right_i <= left_i + 1:
+        return None
+    best_i: int | None = None
+    best_score: float | None = None
+    for i in range(left_i + 1, right_i):
+        close = float(bars[i]["close"])
+        # 优先贴近头价；同距时顶偏好更高收盘、底偏好更低
+        dist = abs(close - head_price)
+        tie = -close if not bottom else close
+        score = (dist, tie)
+        if best_score is None or score < best_score:
+            best_score = score
+            best_i = i
+    return best_i
 
 
 def render_hs_chart(
@@ -102,18 +135,34 @@ def render_hs_chart(
         )
 
     side = str(detail.get("side") or "")
+    bottom = side == "long"
     # 三重的三个点是近似等高的顶/底，标号跟着规格的命名走，别写成肩头肩
     triple = str(detail.get("pattern_kind") or "").startswith("三重")
     labels = ("L1", "L2", "L3") if triple and side != "short" else ("P1", "P2", "P3")
+    # 先解析 L/R，头点可按价位兜底
+    left_i = _index_of(times, _parse_detail_time(detail.get("left_time"), ref))
+    right_i = _index_of(times, _parse_detail_time(detail.get("right_time"), ref))
     for key, label, above in (
         ("left", labels[0] if triple else "L", side != "short"),
         ("head", labels[1] if triple else "H", side != "short"),
         ("right", labels[2] if triple else "R", side != "short"),
     ):
-        t = _parse_detail_time(detail.get(f"{key}_time"), ref)
         price = detail.get(key)
+        if not isinstance(price, (int, float)):
+            continue
+        t = _parse_detail_time(detail.get(f"{key}_time"), ref)
         idx = _index_of(times, t)
-        if idx is None or not isinstance(price, (int, float)):
+        if key == "head" and left_i is not None and right_i is not None:
+            # 中点近似常落在空档：用 L/R 之间最贴近头价的收盘根
+            by_price = _head_idx_by_price(
+                bars, left_i, right_i, float(price), bottom=bottom
+            )
+            if by_price is not None:
+                if idx is None or abs(bars[by_price]["close"] - price) <= abs(
+                    bars[idx]["close"] - price
+                ):
+                    idx = by_price
+        if idx is None:
             continue
         ax.scatter([idx], [price], s=70, facecolors="none", edgecolors=MARK, linewidths=1.6)
         ax.annotate(

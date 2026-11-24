@@ -589,9 +589,21 @@ def api_alert_large_chart(alert_id: str) -> Response:
     if alert is None:
         raise HTTPException(404, "告警不存在")
     extra = alert.get("extra") or {}
-    large_detail = extra.get("large_chart_detail") or {}
+    large_detail = dict(extra.get("large_chart_detail") or {})
+    # 优先用 conflict.large 重算：旧告警 side 曾反转、头时间用中点对不上 K 线
+    larges = (extra.get("conflict") or {}).get("large") or []
+    if larges:
+        from core.tf_conflict import large_pattern_chart_detail
+
+        large_detail = large_pattern_chart_detail(larges[0])
     if not large_detail:
         raise HTTPException(404, "该告警没有大周期形态关键点")
+    # 仅有 large_chart_detail 的旧卡：用 pattern_kind 纠正 side
+    pk = str(large_detail.get("pattern_kind") or "")
+    if "底" in pk:
+        large_detail["side"] = "long"
+    elif "顶" in pk:
+        large_detail["side"] = "short"
     duration_sec = large_detail.get("duration_sec") or extra.get("duration_sec")
     if not duration_sec:
         raise HTTPException(404, "缺大周期周期信息")

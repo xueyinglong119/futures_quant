@@ -60,6 +60,7 @@ class LargePattern:
     right: float
     neck: float
     start_dt: datetime
+    head_dt: datetime
     right_dt: datetime
     end_dt: datetime
     breakout: bool
@@ -79,6 +80,7 @@ class LargePattern:
             "right": round(self.right, 4),
             "neck": round(self.neck, 4),
             "start": _iso(self.start_dt),
+            "head_time": _iso(self.head_dt),
             "right_shoulder": _iso(self.right_dt),
             "as_of": _iso(self.end_dt),
             "status": self.status,
@@ -87,37 +89,37 @@ class LargePattern:
         }
 
     def chart_detail(self) -> dict[str, Any]:
-        """转成 render_hs_chart 能吃的 detail，供冲突卡画大周期形态图。
-
-        LargePattern 不存 head_dt（只存 start_dt=左肩、right_dt=右肩、end_dt=最新根），
-        头的时间用左右肩中点近似，画图只用来标 H 点位置，不影响窗口计算。
-        """
-        from datetime import timedelta
-
-        head_t = self.start_dt + (self.right_dt - self.start_dt) / 2
+        """转成 render_hs_chart 能吃的 detail，供冲突卡画大周期形态图。"""
+        # side 与检测器一致：long=头肩底、short=头肩顶（勿反转，否则标题/标点全反）
+        side = "long" if self.direction == "long" else "short"
         return {
             "left": self.left,
             "head": self.head,
             "right": self.right,
             "neck": self.neck,
             "left_time": _iso(self.start_dt),
-            "head_time": _iso(head_t),
+            "head_time": _iso(self.head_dt),
             "right_time": _iso(self.right_dt),
-            "side": "short" if self.direction == "long" else "long",
+            "side": side,
             "pattern_kind": "头肩顶" if self.pattern == PATTERN_TOP else "头肩底",
         }
 
 
 def large_pattern_chart_detail(large_dict: dict[str, Any]) -> dict[str, Any]:
-    """从 to_dict() 输出转成 render_hs_chart 能吃的 detail。
-
-    用于冲突告警：verdict 里存的是 to_dict() 结果，画图时需要补上 head_time。
-    """
+    """从 to_dict() 输出转成 render_hs_chart 能吃的 detail。"""
     from datetime import datetime
 
     start_t = datetime.fromisoformat(large_dict["start"])
     right_t = datetime.fromisoformat(large_dict["right_shoulder"])
-    head_t = start_t + (right_t - start_t) / 2
+    # 新字段 head_time；旧告警没有时再退回中点（画图侧还会按价位兜底）
+    raw_head = large_dict.get("head_time")
+    if raw_head:
+        head_iso = raw_head
+    else:
+        head_iso = (start_t + (right_t - start_t) / 2).isoformat(timespec="seconds")
+    direction = large_dict.get("direction") or "short"
+    side = "long" if direction == "long" else "short"
+    pattern = large_dict.get("pattern") or PATTERN_TOP
     return {
         "duration_sec": large_dict["duration_sec"],
         "left": large_dict["left"],
@@ -125,10 +127,10 @@ def large_pattern_chart_detail(large_dict: dict[str, Any]) -> dict[str, Any]:
         "right": large_dict["right"],
         "neck": large_dict["neck"],
         "left_time": large_dict["start"],
-        "head_time": head_t.isoformat(timespec="seconds"),
+        "head_time": head_iso,
         "right_time": large_dict["right_shoulder"],
-        "side": "short" if large_dict["direction"] == "long" else "long",
-        "pattern_kind": "头肩顶" if large_dict["pattern"] == PATTERN_TOP else "头肩底",
+        "side": side,
+        "pattern_kind": "头肩顶" if pattern == PATTERN_TOP else "头肩底",
     }
 
 
@@ -273,7 +275,12 @@ def _state_of(
     try:
         left_dt = _ts(win.iloc[int(detail["left_idx"])]["datetime"])
         right_dt = _ts(win.iloc[int(detail["right_idx"])]["datetime"])
-    except (IndexError, KeyError, ValueError):
+        head_idx = detail.get("head_idx")
+        if head_idx is not None:
+            head_dt = _ts(win.iloc[int(head_idx)]["datetime"])
+        else:
+            head_dt = left_dt + (right_dt - left_dt) / 2
+    except (IndexError, KeyError, ValueError, TypeError):
         return None
     last_dt = _ts(win.iloc[-1]["datetime"])
     return LargePattern(
@@ -285,6 +292,7 @@ def _state_of(
         right=float(detail["right"]),
         neck=float(detail["neck"]),
         start_dt=left_dt,
+        head_dt=head_dt,
         right_dt=right_dt,
         end_dt=last_dt,
         breakout=False,
