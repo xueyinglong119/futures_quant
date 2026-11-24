@@ -152,6 +152,8 @@
 
 **冷启动**：换月/首建时按周期拉历史——日内约 **90** 日历天、日线约 **400** 天（覆盖 lookback，不是全品种统一一年）。首迁上线或补缺口：休市跑 `python scripts/refresh_dominants.py --bootstrap-missing`；`--no-bootstrap` 只刷表。ingest 盘中只在换月时冷启动，避免开盘卡死。
 
+**连续主力 KQ.m@ 日终补库（2026-11-24）**：盘中只写月约；`KQ.m@` 改由 ingest 在**工作日 15:30～20:50** 每天自动补最近 5 个日历日的 1m/5m/1d + 会话合成（`core/cont_sync.py`，入口挂在 `scripts/run_ingest_pipeline.py`）。手工：`python -u scripts/sync_cont_mains_daily.py`。
+
 ingest 采集、monitor 检测、`kline_audit`、`repair_today_klines`、`monitor_all_mains_hs` 全部走 `list_commodity_mains`，所以改这里等于同时改覆盖面、扫描量和采集量。`KQ.m@` 主连仍可通过 `list_commodity_cont_mains` / `list_main_continuous` 做长序列回填，但**不做形态检测订阅**。
 
 **11-19 用户裁决**：截图点名「粳米这类非常不活跃的期货不要放进去观察」。口径给的是**近 90 日 1d 日均成交量 < 5000 手**（同期全市场中位数 16.2 万手），命中 11 个：
