@@ -109,26 +109,40 @@ def large_pattern_chart_detail(large_dict: dict[str, Any]) -> dict[str, Any]:
     """从 to_dict() 输出转成 render_hs_chart 能吃的 detail。"""
     from datetime import datetime
 
-    start_t = datetime.fromisoformat(large_dict["start"])
-    right_t = datetime.fromisoformat(large_dict["right_shoulder"])
-    # 新字段 head_time；旧告警没有时再退回中点（画图侧还会按价位兜底）
+    def _parse(key: str) -> datetime | None:
+        raw = large_dict.get(key)
+        if raw is None:
+            return None
+        if isinstance(raw, datetime):
+            return raw.replace(tzinfo=None, microsecond=0) if raw.tzinfo else raw.replace(microsecond=0)
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).replace(
+                tzinfo=None, microsecond=0
+            )
+        except ValueError:
+            return None
+
+    start_t = _parse("start")
+    right_t = _parse("right_shoulder")
+    if start_t is None or right_t is None:
+        raise ValueError(f"大形态缺 start/right_shoulder: keys={list(large_dict)}")
     raw_head = large_dict.get("head_time")
     if raw_head:
-        head_iso = raw_head
+        head_iso = str(raw_head)
     else:
         head_iso = (start_t + (right_t - start_t) / 2).isoformat(timespec="seconds")
     direction = large_dict.get("direction") or "short"
     side = "long" if direction == "long" else "short"
     pattern = large_dict.get("pattern") or PATTERN_TOP
     return {
-        "duration_sec": large_dict["duration_sec"],
-        "left": large_dict["left"],
-        "head": large_dict["head"],
-        "right": large_dict["right"],
-        "neck": large_dict["neck"],
-        "left_time": large_dict["start"],
+        "duration_sec": large_dict.get("duration_sec"),
+        "left": large_dict.get("left"),
+        "head": large_dict.get("head"),
+        "right": large_dict.get("right"),
+        "neck": large_dict.get("neck"),
+        "left_time": large_dict.get("start"),
         "head_time": head_iso,
-        "right_time": large_dict["right_shoulder"],
+        "right_time": large_dict.get("right_shoulder"),
         "side": side,
         "pattern_kind": "头肩顶" if pattern == PATTERN_TOP else "头肩底",
     }

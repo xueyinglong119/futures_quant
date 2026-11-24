@@ -607,10 +607,15 @@ def api_alert_large_chart(alert_id: str) -> Response:
     duration_sec = large_detail.get("duration_sec") or extra.get("duration_sec")
     if not duration_sec:
         raise HTTPException(404, "缺大周期周期信息")
-    bar_time = large_detail.get("right_time") or alert["bar_time"]
+    bar_time = large_detail.get("right_time") or alert.get("bar_time")
     conn = connect()
     try:
-        png = render_hs_chart(alert["symbol"], int(duration_sec), bar_time, large_detail, conn)
+        try:
+            png = render_hs_chart(
+                alert["symbol"], int(duration_sec), str(bar_time), large_detail, conn
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"大周期画图失败: {exc}") from exc
     finally:
         conn.close()
     if not png:

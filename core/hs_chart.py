@@ -26,43 +26,62 @@ NECK = "#8FA6BC"
 BG = "#0E1A24"
 
 
-def _parse_detail_time(text: Any, ref: datetime) -> datetime | None:
-    """解析 detail 时间：常规告警是 MM-DD HH:MM；冲突大周期图是 ISO。
+def _as_naive(dt: datetime) -> datetime:
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    return dt.replace(microsecond=0)
 
-    MM-DD 缺年时用 ref 的年份；比参考时间晚一天以上视为跨年。
-    """
+
+def _parse_any_time(text: Any) -> datetime | None:
+    """ISO / datetime → 无时区 datetime。"""
+    if isinstance(text, datetime):
+        return _as_naive(text)
+    if not isinstance(text, str) or not text.strip():
+        return None
+    raw = text.strip().replace("Z", "+00:00")
+    try:
+        return _as_naive(datetime.fromisoformat(raw))
+    except ValueError:
+        return None
+
+
+def _parse_detail_time(text: Any, ref: datetime) -> datetime | None:
+    """解析 detail 时间：常规告警 MM-DD HH:MM；冲突大周期图 ISO。"""
+    if isinstance(text, datetime):
+        return _as_naive(text)
     if not isinstance(text, str) or not text.strip():
         return None
     raw = text.strip()
-    # large_chart_detail / right_time 走 ISO（含 "T" 或完整年月日）
-    if "T" in raw or (raw.count("-") >= 2 and len(raw) >= 16):
-        try:
-            return datetime.fromisoformat(raw.replace("Z", ""))
-        except ValueError:
-            pass
+    # MM-DD HH:MM（常规告警）
     try:
-        dt = datetime.strptime(raw, "%m-%d %H:%M").replace(year=ref.year)
+        dt = datetime.strptime(raw, "%m-%d %H:%M").replace(year=_as_naive(ref).year)
+        if dt > _as_naive(ref) + timedelta(days=1):
+            dt = dt.replace(year=_as_naive(ref).year - 1)
+        return dt
     except ValueError:
-        return None
-    if dt > ref + timedelta(days=1):
-        dt = dt.replace(year=ref.year - 1)
-    return dt
+        pass
+    return _parse_any_time(raw)
 
 
 def _index_of(times: list[datetime], target: datetime | None) -> int | None:
     """精确命中；否则取最近一根（冲突大图的头时间曾用中点近似，对不上整点）。"""
     if target is None or not times:
         return None
-    best_i = 0
-    best_d = abs(times[0] - target)
+    target = _as_naive(target) if isinstance(target, datetime) else _parse_any_time(target)
+    if target is None:
+        return None
+    best_i: int | None = None
+    best_d: timedelta | None = None
     for i, t in enumerate(times):
-        if t == target:
+        tn = _as_naive(t) if isinstance(t, datetime) else _parse_any_time(t)
+        if tn is None:
+            continue
+        if tn == target:
             return i
-        d = abs(t - target)
-        if d < best_d:
+        d = abs(tn - target)
+        if best_d is None or d < best_d:
             best_d = d
             best_i = i
-    # 最近根也不能离谱：超过 1.5 根周期时长就当没找到
     return best_i
 
 
@@ -99,9 +118,8 @@ def render_hs_chart(
     conn: Any,
     future_bars: int = 6,
 ) -> bytes | None:
-    try:
-        ref = datetime.fromisoformat(bar_time)
-    except ValueError:
+    ref = _parse_any_time(bar_time)
+    if ref is None:
         return None
     left_t = _parse_detail_time(detail.get("left_time"), ref)
     if left_t is None:
@@ -111,7 +129,16 @@ def render_hs_chart(
     bars = load_bars(conn, symbol, duration_sec, start=start, end=end)
     if not bars:
         return None
-    times = [b["datetime_end"] for b in bars]
+    times: list[datetime] = []
+    for b in bars:
+        tn = (
+            _as_naive(b["datetime_end"])
+            if isinstance(b["datetime_end"], datetime)
+            else _parse_any_time(b["datetime_end"])
+        )
+        if tn is None:
+            return None
+        times.append(tn)
     n = len(times)
 
     fig, ax = plt.subplots(figsize=(7.2, 4.0), dpi=110)
