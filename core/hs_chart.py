@@ -27,11 +27,21 @@ BG = "#0E1A24"
 
 
 def _parse_detail_time(text: Any, ref: datetime) -> datetime | None:
-    """detail 里的 MM-DD HH:MM 补上年份；比参考时间晚一天以上视为跨年。"""
-    if not isinstance(text, str):
+    """解析 detail 时间：常规告警是 MM-DD HH:MM；冲突大周期图是 ISO。
+
+    MM-DD 缺年时用 ref 的年份；比参考时间晚一天以上视为跨年。
+    """
+    if not isinstance(text, str) or not text.strip():
         return None
+    raw = text.strip()
+    # large_chart_detail / right_time 走 ISO（含 "T" 或完整年月日）
+    if "T" in raw or (raw.count("-") >= 2 and len(raw) >= 16):
+        try:
+            return datetime.fromisoformat(raw.replace("Z", ""))
+        except ValueError:
+            pass
     try:
-        dt = datetime.strptime(text, "%m-%d %H:%M").replace(year=ref.year)
+        dt = datetime.strptime(raw, "%m-%d %H:%M").replace(year=ref.year)
     except ValueError:
         return None
     if dt > ref + timedelta(days=1):
