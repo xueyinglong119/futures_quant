@@ -590,12 +590,19 @@ def api_alert_large_chart(alert_id: str) -> Response:
         raise HTTPException(404, "告警不存在")
     extra = alert.get("extra") or {}
     large_detail = dict(extra.get("large_chart_detail") or {})
-    # 优先用 conflict.large 重算：旧告警 side 曾反转、头时间用中点对不上 K 线
-    larges = (extra.get("conflict") or {}).get("large") or []
+    # 注意：extra.conflict 存的是 bool 标记；判决详情在 extra.tf_conflict
+    verdict = extra.get("tf_conflict")
+    if not isinstance(verdict, dict):
+        raw = extra.get("conflict")
+        verdict = raw if isinstance(raw, dict) else {}
+    larges = verdict.get("large") or []
     if larges:
         from core.tf_conflict import large_pattern_chart_detail
 
-        large_detail = large_pattern_chart_detail(larges[0])
+        try:
+            large_detail = large_pattern_chart_detail(larges[0])
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(500, f"大周期形态点位解析失败: {exc}") from exc
     if not large_detail:
         raise HTTPException(404, "该告警没有大周期形态关键点")
     # 仅有 large_chart_detail 的旧卡：用 pattern_kind 纠正 side
@@ -607,19 +614,37 @@ def api_alert_large_chart(alert_id: str) -> Response:
     duration_sec = large_detail.get("duration_sec") or extra.get("duration_sec")
     if not duration_sec:
         raise HTTPException(404, "缺大周期周期信息")
-    bar_time = large_detail.get("right_time") or alert.get("bar_time")
+    # 用 as_of/告警时刻作右边界，才能覆盖突破后的确认段
+    bar_time = (
+        (larges[0].get("as_of") if larges else None)
+        or large_detail.get("right_time")
+        or alert.get("bar_time")
+    )
+    # list API 会把 symbol 改成中文标题；画图必须用合约代码
+    symbol = str(alert.get("symbol") or "")
+    if "·" in symbol or not ("." in symbol or symbol.startswith("KQ.")):
+        # 从 pattern 键 / display 里抠：SHFE.br2701|60|...
+        pattern = str(extra.get("pattern") or "")
+        if "|" in pattern:
+            symbol = pattern.split("|", 1)[0]
+        else:
+            disp = str(extra.get("display") or "")
+            if "(" in disp and disp.endswith(")"):
+                symbol = disp[disp.rfind("(") + 1 : -1]
+    if not symbol:
+        raise HTTPException(404, "缺合约代码")
     conn = connect()
     try:
         try:
             png = render_hs_chart(
-                alert["symbol"], int(duration_sec), str(bar_time), large_detail, conn
+                symbol, int(duration_sec), str(bar_time), large_detail, conn
             )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(500, f"大周期画图失败: {exc}") from exc
     finally:
         conn.close()
     if not png:
-        raise HTTPException(404, "没有可画的 K 线")
+        raise HTTPException(404, f"没有可画的 K 线 ({symbol} {duration_sec}s)")
     return Response(
         content=png,
         media_type="image/png",
