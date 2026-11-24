@@ -24,9 +24,14 @@ from core.kline_store import (
     DURATION_1M,
     DURATION_1MON,
     DURATION_1Q,
+    DURATION_1W,
     DURATION_1Y,
+    DURATION_3M,
     DURATION_5M,
+    DURATION_10M,
+    DURATION_15M,
     DURATION_LABELS,
+    INGEST_DURATIONS,
     connect,
     ensure_table,
     load_bars,
@@ -37,17 +42,22 @@ from core.session_rebuild import rebuild_symbol_session_klines
 
 TZ = ZoneInfo("Asia/Shanghai")
 
-# 日终补库周期：与盘中月约主路径对齐的核心三档 + 会话合成
-CONT_SYNC_DURATIONS = (DURATION_1M, DURATION_5M, DURATION_1D)
+# 日终直拉：与旧盘中主连 INGEST 同档（1m/3m/5m/10m/15m/1d/1w）；
+# 30m/1h/2h/3h/4h 仍由 1m 会话合成，不订天勤整点。
+CONT_SYNC_DURATIONS = tuple(INGEST_DURATIONS)
 # 覆盖周末缺口：周五收盘后补到下周一还能接上
 LOOKBACK_CALENDAR_DAYS = 5
 # 每批订阅品种数，避免一次挂太多次序列
-SUBSCRIBE_BATCH = 8
+SUBSCRIBE_BATCH = 6
 
 _DATA_LENGTH: dict[int, int] = {
     DURATION_1M: min(LIVE_MAX_LENGTH, LOOKBACK_CALENDAR_DAYS * 500),
+    DURATION_3M: min(LIVE_MAX_LENGTH, LOOKBACK_CALENDAR_DAYS * 200),
     DURATION_5M: min(LIVE_MAX_LENGTH, LOOKBACK_CALENDAR_DAYS * 120),
+    DURATION_10M: min(LIVE_MAX_LENGTH, LOOKBACK_CALENDAR_DAYS * 80),
+    DURATION_15M: min(LIVE_MAX_LENGTH, LOOKBACK_CALENDAR_DAYS * 60),
     DURATION_1D: min(LIVE_MAX_LENGTH, LOOKBACK_CALENDAR_DAYS + 5),
+    DURATION_1W: min(LIVE_MAX_LENGTH, 8),
 }
 
 
