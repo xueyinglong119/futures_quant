@@ -89,6 +89,16 @@ def get_max_volume(main_symbol: str, default: int = 1) -> int:
     return SYMBOL_MAX_VOLUME.get(main_symbol, default)
 
 
+def tq_trade_enabled() -> bool:
+    """监控进程是否挂 TqKq 并把严格档仓位同步到快期模拟。默认开。"""
+    return os.getenv("TQ_TRADE_ENABLE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def load_mysql_config() -> MysqlConfig:
     host = os.getenv("MYSQL_HOST", "").strip()
     user = os.getenv("MYSQL_USER", "").strip()

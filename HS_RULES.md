@@ -200,7 +200,9 @@ ingest 采集、monitor 检测、`kline_audit`、`repair_today_klines`、`monito
 
 ### 告警页手动开仓（2026-11-18）
 
-App 每条告警展开后有一块「手动开仓（模拟盘）」：价位自己填、**手数自己填**（1~8，初值 1），**买入 = long / 卖出 = short**。它是**模拟盘**单，不是真盘下单——本仓库没有任何实盘下单通道。
+**快期模拟下单（2026-11-25）**：`TQ_TRADE_ENABLE=1`（默认）时，`futures-monitor` 用 `TqApi(account=TqKq(), …)`；严格档在 MySQL `paper_trade` 开/平成功后，按合约净仓同步 `TargetPosTask`（多 +lots / 空 −lots，多周期合并）。常规档、三重、抢跑、超严格、App 手动开仓**只动 MySQL，不发天勤单**。`TQ_TRADE_ENABLE=0` 则退回「只记账不下单」。仍无期货公司实盘通道。
+
+App 每条告警展开后有一块「手动开仓（模拟盘）」：价位自己填、**手数自己填**（1~8，初值 1），**买入 = long / 卖出 = short**。它是 **MySQL 模拟账**单，不经 TqKq。
 
 - 止盈止损**沿用老规则**：距离仍取这条告警的形态高度 `detail.swing` 的 0.8 / 0.2，只是起点换成用户填的价位。swing/extreme/head 全部由服务端从告警 `extra.detail` 读，App 传不进任何金额口径。
 - 价位按最小变动价位取整后成交；`paper_trade.price_tick` 是这次新加的列（`ensure_schema` 自动 `ALTER`，老行是 NULL 就按原样不取整，等新自动单跑过就有值）。

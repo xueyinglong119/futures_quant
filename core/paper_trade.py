@@ -134,6 +134,7 @@ class OpenPosition:
     tp_price: float
     sl_price: float
     last_price: float
+    kind: str = ""
 
 
 @dataclass
@@ -318,9 +319,17 @@ class ContractBook:
 
 
 class PaperBroker:
-    def __init__(self, conn: Connection, api: Any, log_path: Path | None = None):
+    def __init__(
+        self,
+        conn: Connection,
+        api: Any,
+        log_path: Path | None = None,
+        *,
+        tq: Any = None,
+    ):
         self.conn = conn
         self.specs = ContractBook(api)
+        self.tq = tq  # TqKqExecutor | None：严格档净仓同步到快期模拟
         self.log_path = log_path or _LOG_PATH
         self.initial_cash = INITIAL_CASH
         self.cash = INITIAL_CASH
@@ -329,6 +338,8 @@ class PaperBroker:
         self._last_cap_check = 0.0
         ensure_schema(conn)
         self._load()
+        if self.tq is not None:
+            self._reconcile_tq()
 
     def on_signal(
         self,
@@ -686,6 +697,7 @@ class PaperBroker:
             tp_price=tp_price,
             sl_price=sl_price,
             last_price=entry,
+            kind=kind,
         )
         self._open[(symbol, duration_sec)] = pos
         side_text = "空" if side == "short" else "多"
@@ -695,6 +707,7 @@ class PaperBroker:
             f"价{entry:g} {lots}手 保证金{margin:.2f} 比例{rate:.4f} "
             f"手续费{fee_open:.2f} 止盈{tp_price:g} 止损{sl_price:g} 本金{equity:.2f}"
         )
+        self._sync_tq(symbol)
 
     def _close_trade(self, pos: OpenPosition, when: datetime, reason: str, exit_price: float) -> None:
         fee_close = money(pos.fee_per_lot * pos.lots)
@@ -729,6 +742,33 @@ class PaperBroker:
             f"价{exit_price:g} 价差盈亏{gross:.2f} 平仓手续费{fee_close:.2f} "
             f"开仓手续费{pos.fee_open:.2f} 净盈亏{net:.2f} 本金{equity:.2f}"
         )
+        self._sync_tq(pos.symbol)
+
+    def _tq_net_lots(self, symbol: str) -> int:
+        from core.tq_executor import is_strict_tq_kind
+
+        net = 0
+        for pos in self._open.values():
+            if pos.symbol != symbol or not is_strict_tq_kind(pos.kind):
+                continue
+            net += pos.lots if pos.side == "long" else -pos.lots
+        return net
+
+    def _sync_tq(self, symbol: str) -> None:
+        if self.tq is None:
+            return
+        try:
+            self.tq.set_net(symbol, self._tq_net_lots(symbol))
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"天勤同步失败 {get_display_name(symbol)}：{exc}")
+
+    def _reconcile_tq(self) -> None:
+        """进程启动时按库里严格档持仓重推天勤目标仓。"""
+        if self.tq is None:
+            return
+        symbols = {pos.symbol for pos in self._open.values()}
+        for symbol in sorted(symbols):
+            self._sync_tq(symbol)
 
     def _update_last_price(self, pos: OpenPosition) -> None:
         cur = self.conn.cursor()
@@ -775,7 +815,7 @@ class PaperBroker:
             self.cash = float(row["cash"])
             cur.execute(
                 """
-                SELECT id, symbol, name, duration_sec, duration, side, open_time, open_price,
+                SELECT id, symbol, name, duration_sec, duration, side, kind, open_time, open_price,
                        lots, multiplier, margin, fee_per_lot, fee_open, tp_price, sl_price, last_price
                 FROM paper_trade WHERE status='open' ORDER BY id
                 """
@@ -799,9 +839,25 @@ class PaperBroker:
                     tp_price=float(item["tp_price"]),
                     sl_price=float(item["sl_price"]),
                     last_price=float(item["last_price"]),
+                    kind=str(item.get("kind") or ""),
                 )
                 opened[(pos.symbol, pos.duration_sec)] = pos
-            self._open = opened
+            # 看板手动平仓/开仓后，把仓位变动同步到天勤
+            if self.tq is not None:
+                changed = {
+                    pos.symbol
+                    for key, pos in self._open.items()
+                    if key not in opened
+                }
+                for key, pos in opened.items():
+                    old = self._open.get(key)
+                    if old is None or old.lots != pos.lots or old.side != pos.side:
+                        changed.add(pos.symbol)
+                self._open = opened
+                for symbol in sorted(changed):
+                    self._sync_tq(symbol)
+            else:
+                self._open = opened
         finally:
             cur.close()
 

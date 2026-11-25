@@ -101,6 +101,7 @@ python scripts/sync_all_main_klines.py --mode rebuild-session
 ```env
 TQ_USER=快期账号
 TQ_PASS=快期密码
+TQ_TRADE_ENABLE=1   # 严格档同步到快期模拟 TqKq；0=只记 MySQL
 MYSQL_HOST=rm-xxxx.mysql.rds.aliyuncs.com
 MYSQL_PORT=3306
 MYSQL_USER=...

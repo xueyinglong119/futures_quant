@@ -13,9 +13,9 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from tqsdk import TqApi, TqAuth
+from tqsdk import TqApi, TqAuth, TqKq
 
-from config.settings import Settings, load_settings
+from config.settings import Settings, load_settings, tq_trade_enabled
 from core.cont_symbols import drop_illiquid, list_commodity_mains
 from core.hs_fanout import HsFanout, KeyResult, detect_one
 from core.hs_monitor import (
@@ -43,6 +43,7 @@ from core.realtime_pipeline import (
     session_bar_open,
 )
 from core.tf_conflict import PROBE_BARS, TF_CONFLICT, ConflictJudge
+from core.tq_executor import TqKqExecutor
 
 POLL_SEC = 0.5
 IDLE_SEC = 15.0
@@ -80,7 +81,17 @@ class DbHsMonitor:
 
     def run_forever(self) -> None:
         cfg = self.settings
-        api = TqApi(auth=TqAuth(cfg.auth.user, cfg.auth.password))
+        trade_on = tq_trade_enabled()
+        if trade_on:
+            # 快期模拟：严格档开平仓会经 TargetPosTask 真下单；MySQL paper 账本仍保留
+            api = TqApi(
+                account=TqKq(),
+                auth=TqAuth(cfg.auth.user, cfg.auth.password),
+            )
+            print("[monitor] TqApi 已挂 TqKq 快期模拟账户", flush=True)
+        else:
+            api = TqApi(auth=TqAuth(cfg.auth.user, cfg.auth.password))
+            print("[monitor] TQ_TRADE_ENABLE=0，不下单到天勤", flush=True)
         conn = connect()
         ensure_table(conn)
         self.conn = conn
@@ -93,9 +104,14 @@ class DbHsMonitor:
             traceback.print_exc()
             self.fanout = None
         try:
-            self.broker = PaperBroker(conn, api)
+            tq = TqKqExecutor(api) if trade_on else None
+            self.broker = PaperBroker(conn, api, tq=tq)
             self.engine.on_signal = self.broker.on_signal
-            print("[monitor] 模拟账户已挂接", flush=True)
+            print(
+                "[monitor] 模拟账户已挂接"
+                + ("（严格档同步快期模拟）" if trade_on else ""),
+                flush=True,
+            )
         except Exception:
             traceback.print_exc()
             print("[monitor] 模拟账户初始化失败，本进程只告警不开仓", flush=True)
@@ -260,6 +276,9 @@ class DbHsMonitor:
             return 0
         if self.broker is not None:
             try:
+                # TargetPosTask 依赖 wait_update；每轮短暂推进，避免挂单停住
+                if self.broker.tq is not None:
+                    self.broker.tq.pump(0.2)
                 self.broker.retry_pending()
                 self.broker.check_loss_caps()
             except Exception:
