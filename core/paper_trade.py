@@ -349,13 +349,16 @@ class PaperBroker:
         if side not in ("long", "short") or swing is None or swing <= 0 or extreme is None or head is None:
             self._log(f"跳过 {name} {when}：没有可用的头到左肩高度")
             return
-        if (symbol, duration_sec) in self._open:
-            self._log(f"跳过 {name} {when}：该周期已有持仓")
-            return
         if df is None or len(df) == 0:
             return
         entry = float(df.iloc[-1]["close"])
         if entry <= 0:
+            return
+        when_n = _as_naive(when)
+        # 同合约已有反向仓：先平再开，避免多空并存
+        self._close_opposite(symbol, side, when=when_n, exit_price=entry)
+        if (symbol, duration_sec) in self._open:
+            self._log(f"跳过 {name} {when}：该周期已有同向持仓")
             return
         strict = bool(detail.get("strict"))
         # 三重通道复用同一条开仓路径，看板上的形态名要跟告警一致
@@ -385,7 +388,7 @@ class PaperBroker:
         self._open_trade(
             symbol=symbol,
             duration_sec=duration_sec,
-            when=_as_naive(when),
+            when=when_n,
             side=side,
             entry=entry,
             swing=swing,
@@ -466,8 +469,11 @@ class PaperBroker:
                 item.next_try = now + PENDING_RETRY_SEC
                 continue
             self._pending.pop(key, None)
+            self._close_opposite(
+                item.symbol, item.side, when=item.when, exit_price=item.entry
+            )
             if key in self._open:
-                self._log(f"跳过 {name} {label} {item.when:%m-%d %H:%M}：该周期已有持仓")
+                self._log(f"跳过 {name} {label} {item.when:%m-%d %H:%M}：该周期已有同向持仓")
                 continue
             try:
                 self._open_trade(
@@ -558,6 +564,32 @@ class PaperBroker:
 
     def snapshot(self) -> dict[str, Any]:
         return account_snapshot(self.conn)
+
+    def _close_opposite(
+        self,
+        symbol: str,
+        side: str,
+        *,
+        when: datetime,
+        exit_price: float,
+    ) -> int:
+        """平掉同合约上所有反向持仓（及反向挂起），返回平仓笔数。"""
+        closed = 0
+        for _key, pos in list(self._open.items()):
+            if pos.symbol != symbol or pos.side == side:
+                continue
+            self._close_trade(pos, when, "反向信号平仓", exit_price)
+            closed += 1
+        for key, item in list(self._pending.items()):
+            if item.symbol != symbol or item.side == side:
+                continue
+            self._pending.pop(key, None)
+            name = get_display_name(symbol)
+            label = DURATION_LABELS.get(item.duration_sec, str(item.duration_sec))
+            self._log(
+                f"取消挂起 {name} {label} {item.when:%m-%d %H:%M}：因反向信号"
+            )
+        return closed
 
     def _open_trade(
         self,
@@ -1091,15 +1123,55 @@ def manual_open(
         cash = float(account["cash"])
         cur.execute(
             """
-            SELECT symbol, duration_sec, side, open_price, multiplier, lots,
-                   margin, last_price
+            SELECT id, symbol, duration_sec, side, open_price, multiplier, lots,
+                   margin, last_price, fee_open, fee_per_lot
             FROM paper_trade WHERE status='open'
             """
         )
-        held = cur.fetchall()
+        held = list(cur.fetchall())
+        # 同合约反向仓先平，再开新方向（与自动单一致）
+        for item in list(held):
+            if str(item["symbol"]) != symbol or str(item["side"]) == side:
+                continue
+            exit_px = float(item["last_price"] or entry)
+            fee_close = money(float(item["fee_per_lot"]) * int(item["lots"]))
+            gross = money(
+                price_pnl(
+                    str(item["side"]),
+                    float(item["open_price"]),
+                    exit_px,
+                    float(item["multiplier"]),
+                    int(item["lots"]),
+                )
+            )
+            fee_open_old = float(item["fee_open"])
+            net = money(gross - fee_open_old - fee_close)
+            cash = money(cash + gross - fee_close)
+            when_close = store_clock_now(int(item["duration_sec"]))
+            cur.execute(
+                """
+                UPDATE paper_trade
+                SET status='closed', close_time=%s, close_price=%s, close_reason=%s,
+                    fee_close=%s, gross_pnl=%s, net_pnl=%s, equity_after_close=%s, last_price=%s
+                WHERE id=%s AND status='open'
+                """,
+                (
+                    when_close,
+                    exit_px,
+                    "反向信号平仓",
+                    fee_close,
+                    gross,
+                    net,
+                    money(cash),
+                    exit_px,
+                    item["id"],
+                ),
+            )
+            held.remove(item)
+        cur.execute("UPDATE paper_account SET cash=%s WHERE id=1", (cash,))
         for item in held:
             if str(item["symbol"]) == symbol and int(item["duration_sec"]) == int(duration_sec):
-                raise ValueError("该品种该周期已有持仓")
+                raise ValueError("该品种该周期已有同向持仓")
         margin_used = sum(float(item["margin"]) for item in held)
         unrealized = sum(
             price_pnl(
